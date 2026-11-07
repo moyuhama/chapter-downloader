@@ -32,6 +32,8 @@ function updateOutputHint(output = '') {
 function setOutputLocked(locked, output = '') {
   outputLocked = locked;
   $('chapterConcurrency').disabled = locked;
+  $('generatePdf').disabled = locked;
+  $('splitLongImages').disabled = locked || !$('generatePdf').checked;
   $('bookTitle').readOnly = locked; $('downloadDirectory').readOnly = locked;
   $('chooseDirectory').disabled = locked || busy;
   updateOutputHint(output);
@@ -148,7 +150,7 @@ $('download').onclick = () => task(async () => {
   if(parsedUrl !== $('url').value.trim()) throw new Error('网址已变化，请重新解析');
   const selected = chapters.filter(c=>c.selected); if(!selected.length) throw new Error('请选择章节');
   const revision = sourceRevision, source = parsedUrl;
-  const input = { url:parsedUrl, title:$('bookTitle').value, directory:$('downloadDirectory').value.trim(), chapterConcurrency:Number($('chapterConcurrency').value || 2), chapters:selected.map(({title,url})=>({title,url})), options:options() };
+  const input = { url:parsedUrl, title:$('bookTitle').value, directory:$('downloadDirectory').value.trim(), chapterConcurrency:Number($('chapterConcurrency').value || 2), generatePdf:$('generatePdf').checked, splitLongImages:$('splitLongImages').checked, chapters:selected.map(({title,url})=>({title,url})), options:options() };
   let started = false;
   setOutputLocked(true);
   try {
@@ -163,6 +165,13 @@ $('download').onclick = () => task(async () => {
     notice('下载任务已开始，文件夹名称和保存目录已锁定。'); await refresh();
   } finally { if (!started && isCurrent(revision, source)) setOutputLocked(false); }
 });
+const pdfLabels = { pending:'待生成', queued:'排队中', generating:'生成中', completed:'已生成', failed:'生成失败' };
+function pdfLink(j, c) { return `${backendBase}/api/jobs/${encodeURIComponent(j.id)}/chapters/${c.number}/pdf`; }
+function chapterStatus(j, c) {
+  const pdf = j.generatePdf ? ` · PDF ${pdfLabels[c.pdf?.status] || (c.status === 'completed' ? '待生成' : '等待图片齐全')}${c.pdf?.status === 'generating' ? ` (${c.pdf.done || 0}/${c.imageCount} 张)` : ''}${c.pdf?.pages ? ` · ${c.pdf.pages} 页` : ''}` : '';
+  return `<div>${String(c.number).padStart(3,'0')} · ${escape(c.title)} — ${labels[c.status] || c.status} (${c.imageCount} 张)${pdf} ${escape(c.error)} ${escape(c.pdf?.error)}${c.pdf?.status === 'completed' ? ` <a class="pdf-link" href="${pdfLink(j,c)}" target="_blank" rel="noopener noreferrer">打开 PDF ↗</a>` : ''}</div>`;
+}
+$('generatePdf').addEventListener('change', () => { $('splitLongImages').disabled = outputLocked || !$('generatePdf').checked; });
 let refreshing = false;
 async function refresh() {
   if (refreshing || !backendConnected) return; refreshing = true;
@@ -188,9 +197,12 @@ async function refresh() {
     const focused = document.activeElement?.dataset;
     const openDetails = new Set([...document.querySelectorAll('.job details[open]')].map(d => d.closest('.job').querySelector('[data-id]').dataset.id));
     $('jobs').innerHTML = jobs.map(j => {
-      const percent = j.total ? Math.round(j.done / j.total * 100) : 0;
+      const pdfDone = j.chapters.filter(c => c.pdf?.status === 'completed').length;
+      const pdfFailed = j.chapters.filter(c => c.pdf?.status === 'failed').length;
+      const firstPdf = j.chapters.find(c => c.pdf?.status === 'completed');
+      const percent = j.total ? Math.round(j.done / j.total * (j.generatePdf ? 80 : 100) + (j.generatePdf ? pdfDone / j.chapters.length * 20 : 0)) : 0;
       const active = ['running','queued','paused'].includes(j.status);
-      return `<article class="job"><div class="job-top"><strong>${escape(j.title)}</strong><span class="status ${j.status}">${labels[j.status]}</span></div><div class="progress"><i style="width:${percent}%"></i></div><div class="job-message">${escape(j.message)}</div><div class="stats"><span>并发 <b>${j.chapterConcurrency || 1} 章</b></span><span>章节 <b>${j.chapters.filter(c=>c.status==='completed').length} / ${j.chapters.length}</b></span><span>图片 <b>${j.done} / ${j.total}</b></span><span>失败 <b>${j.failed}</b></span></div><div class="job-actions">${['running','queued'].includes(j.status)?`<button data-id="${j.id}" data-action="pause">暂停</button>`:''}${!['running','queued','completed'].includes(j.status)?`<button data-id="${j.id}" data-action="resume">${['partial','failed'].includes(j.status)?'重试失败项':'继续下载'}</button>`:''}${active?`<button data-id="${j.id}" data-action="stop">停止</button>`:''}<button data-id="${j.id}" data-action="open">打开文件夹 ↗</button></div><div class="job-path">${escape(j.output)}</div><details class="chapter-status" ${openDetails.has(j.id)?'open':''}><summary>查看章节状态</summary>${j.chapters.map(c=>`<div>${String(c.number).padStart(3,'0')} · ${escape(c.title)} — ${labels[c.status] || c.status} (${c.imageCount} 张) ${escape(c.error)}</div>`).join('')}</details></article>`;
+      return `<article class="job"><div class="job-top"><strong>${escape(j.title)}</strong><span class="status ${j.status}">${labels[j.status]}</span></div><div class="progress"><i style="width:${percent}%"></i></div><div class="job-message">${escape(j.message)}</div><div class="stats"><span>并发 <b>${j.chapterConcurrency || 1} 章</b></span><span>章节 <b>${j.chapters.filter(c=>c.status==='completed').length} / ${j.chapters.length}</b></span><span>图片 <b>${j.done} / ${j.total}</b></span><span>失败 <b>${j.failed}</b></span>${j.generatePdf ? `<span>PDF <b>${pdfDone} / ${j.chapters.length}</b>${pdfFailed ? ` · 失败 ${pdfFailed}` : ''}</span>` : ''}</div><div class="job-actions">${['running','queued'].includes(j.status)?`<button data-id="${j.id}" data-action="pause">暂停</button>`:''}${!['running','queued','completed'].includes(j.status)?`<button data-id="${j.id}" data-action="resume">${['partial','failed'].includes(j.status)?'重试失败项':'继续下载'}</button>`:''}${active?`<button data-id="${j.id}" data-action="stop">停止</button>`:''}${pdfFailed && !active ? `<button data-id="${j.id}" data-action="retry-pdf">重试 PDF</button>` : ''}${firstPdf ? `<a class="pdf-link" href="${pdfLink(j,firstPdf)}" target="_blank" rel="noopener noreferrer">打开章节 PDF ↗</a>` : ''}<button data-id="${j.id}" data-action="open">打开文件夹 ↗</button></div><div class="job-path">${escape(j.output)}</div><details class="chapter-status" ${openDetails.has(j.id)?'open':''}><summary>${j.generatePdf ? '查看章节与 PDF' : '查看章节状态'}</summary>${j.chapters.map(c => chapterStatus(j,c)).join('')}</details></article>`;
     }).join('');
     if(focused?.action) document.querySelector(`[data-id="${focused.id}"][data-action="${focused.action}"]`)?.focus();
   } catch(e) { if (revision === sourceRevision && requestedJobId === currentJobId) notice('服务连接失败：' + e.message, true); } finally { refreshing = false; }

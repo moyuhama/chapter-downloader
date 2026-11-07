@@ -2,3 +2,5 @@
 
 .destination{margin-top:18px}.destination input{width:100%}input[readonly]{background:#edf1e6;color:#7c8973;cursor:default}
 .stats{flex-wrap:wrap;gap:8px 18px}#chapterConcurrency{margin-top:2px;min-width:180px}
+
+.pdf-options{margin:16px 0;padding:14px;background:#edf2e5;border-radius:8px;display:grid;gap:12px}.pdf-options p{margin:0}.pdf-link{color:#35674f;font-size:12px;padding:6px 2px;display:inline-block}

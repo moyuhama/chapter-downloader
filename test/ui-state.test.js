@@ -15,7 +15,7 @@ function element() {
 }
 async function app({ route = () => undefined, jobs = [], storedId } = {}) {
   const nodes=new Map(); const $=id=>{ if(!nodes.has(id))nodes.set(id,element());return nodes.get(id); };
-  for(const id of ['minWidth','minHeight']) $(id).value='200'; $('followPages').checked=true; $('mode').value='auto';
+  for(const id of ['minWidth','minHeight']) $(id).value='200'; $('generatePdf').checked=true;$('splitLongImages').checked=true;$('followPages').checked=true; $('mode').value='auto';
   const storage=new Map(storedId ? [['currentDownloadId',storedId]] : []); let interval;
   vm.runInNewContext(script, {
     document:{getElementById:$,querySelector:()=>element(),querySelectorAll:()=>[],activeElement:null},
@@ -136,4 +136,19 @@ test('sends the selected chapter concurrency and locks it together with the dest
   a.url('https://example.com/book');await a.$('parse').click();a.$('chapterConcurrency').value='4';await a.$('download').click();
   assert.equal(payload.chapterConcurrency,4);assert.equal(a.$('chapterConcurrency').disabled,true);
   a.url('https://next.example/book');assert.equal(a.$('chapterConcurrency').disabled,false);
+});
+test('PDF defaults are submitted, conversion options lock after starting, and disabling PDF disables long-image splitting',async()=>{
+  let payload;
+  const a=await app({route:(p,b)=>{if(p==='/api/jobs'&&b){payload=b;return {id:'pdf',status:'running',title:b.title,directory:b.directory,folderName:b.title,output:'/target'};}}});
+  a.url('https://example.com/book');await a.$('parse').click();await a.$('download').click();
+  assert.equal(payload.generatePdf,true);assert.equal(payload.splitLongImages,true);assert.equal(a.$('generatePdf').disabled,true);assert.equal(a.$('splitLongImages').disabled,true);
+  a.url('https://next.example/book');a.$('generatePdf').checked=false;a.$('generatePdf').emit('change');assert.equal(a.$('splitLongImages').disabled,true);
+});
+test('PDF failure and completed chapter links render separately from image download status',async()=>{
+  const job={id:'pdfjob',status:'partial',title:'PDF',generatePdf:true,done:4,total:4,failed:0,message:'partial',output:'/test',chapters:[
+    {number:1,title:'chapter1',status:'completed',imageCount:2,pdf:{status:'failed',error:'bad <tag>'}},
+    {number:2,title:'chapter2',status:'completed',imageCount:2,pdf:{status:'completed',file:'chapter2.pdf',pages:2}},
+  ]};
+  const a=await app({jobs:[job],storedId:'pdfjob'});const html=a.$('jobs').innerHTML;
+  assert.match(html,/data-action="retry-pdf"/);assert.match(html,/bad &lt;tag&gt;/);assert.match(html,/\/api\/jobs\/pdfjob\/chapters\/2\/pdf/);assert.match(html,/2 页/);
 });

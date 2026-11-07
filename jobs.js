@@ -3,9 +3,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { httpUrl, safeName, sleep } from './crawler.js';
 import { defaultDownloadDirectory } from './directories.js';
+import { generateChapterPdf } from './pdf.js';
 const terminal = new Set(['completed', 'partial', 'stopped', 'interrupted', 'failed']);
 export class Jobs {
-  constructor(root, crawler, { defaultDirectory = defaultDownloadDirectory } = {}) { this.defaultDirectory = defaultDirectory; this.creating = false; this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
+  constructor(root, crawler, { defaultDirectory = defaultDownloadDirectory, pdfBuilder = generateChapterPdf } = {}) { this.pdfBuilder = pdfBuilder; this.pdfTail = Promise.resolve(); this.defaultDirectory = defaultDirectory; this.creating = false; this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
   async init() {
     await fs.mkdir(path.join(this.root, 'data'), { recursive: true });
     try { const stored = JSON.parse(await fs.readFile(path.join(this.root, 'data/jobs.json'), 'utf8')); for (const job of stored) { if (!terminal.has(job.status)) job.status = 'interrupted'; this.jobs.set(job.id, job); } } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -31,7 +32,7 @@ export class Jobs {
     if (!Number.isInteger(chapterConcurrency) || chapterConcurrency < 1 || chapterConcurrency > 4) throw new Error('章节并发数必须为 1–4 的整数');
     const options = input.options || {};
     for (const key of ['minWidth', 'minHeight']) if (!Number.isFinite(Number(options[key] ?? 200)) || Number(options[key] ?? 200) < 0) throw new Error('图片尺寸必须是非负数');
-    const job = { id: randomUUID(), title, url: source, chapterConcurrency, createdAt: new Date().toISOString(), status: 'queued', message: '等待开始', done: 0, failed: 0, total: 0,
+    const job = { id: randomUUID(), title, url: source, chapterConcurrency, generatePdf: input.generatePdf !== false, splitLongImages: input.splitLongImages !== false, createdAt: new Date().toISOString(), status: 'queued', message: '等待开始', done: 0, failed: 0, total: 0,
       directory: path.resolve(directory), folderName: title, output: '',
       options: { chapterSelector: String(options.chapterSelector || ''), imageSelector: String(options.imageSelector || ''), nextSelector: String(options.nextSelector || ''), minWidth: Number(options.minWidth ?? 200), minHeight: Number(options.minHeight ?? 200), followPages: options.followPages !== false },
       chapters: input.chapters.map((c, i) => ({ title: String(c.title || `第 ${i + 1} 章`), url: httpUrl(c.url), number: i + 1, folder: `${String(i + 1).padStart(3, '0')}_${safeName(c.title || '章节')}`, status: 'pending', images: [], error: '' })) };
@@ -51,20 +52,25 @@ export class Jobs {
     const j = this.jobs.get(id); if (!j) throw new Error('任务不存在');
     if (action === 'pause' && ['running', 'queued'].includes(j.status)) j.status = 'paused';
     else if (action === 'stop' && !terminal.has(j.status)) { j.status = 'stopped'; j.message = '已停止，可继续未完成项目'; }
-    else if (action === 'resume') {
+    else if (action === 'resume' || action === 'retry-pdf') {
+      if (action === 'retry-pdf' && !j.generatePdf) throw new Error('该任务未启用 PDF 生成');
       if ([...this.running].some(otherId => otherId !== id) || [...this.jobs.values()].some(other => other.id !== id && !terminal.has(other.status))) throw new Error('另一个任务尚未结束');
       if (this.running.has(id)) { if (j.status === 'paused') j.status = 'running'; else throw new Error('正在收尾，请稍后继续'); }
-      else { j.status = 'queued'; await this.persist(); this.start(j); }
+      else { j.status = 'queued'; await this.persist(); this.start(j, { pdfOnly: action === 'retry-pdf' }); }
     } else throw new Error('当前状态不支持此操作');
     await this.persist(); return this.summary(j);
   }
   async checkpoint(j) { while (j.status === 'paused') await sleep(180); if (j.status === 'stopped') throw new Error('__STOP__'); }
-  start(j) { this.running.add(j.id); this.run(j).catch(async e => { if (j.status !== 'stopped') { j.status = 'failed'; j.message = e.message; } await this.persist(); }).finally(() => this.running.delete(j.id)); }
+  start(j, options) { this.running.add(j.id); this.run(j, options).catch(async e => { if (j.status !== 'stopped') { j.status = 'failed'; j.message = e.message; } await this.persist(); }).finally(() => this.running.delete(j.id)); }
   updateMessage(j) {
     if (j.status !== 'running') return;
     const active = j.chapters.filter(c => c.status === 'running');
     j.current = active.map(c => c.number);
-    j.message = active.length ? `正在处理 ${active.length} 章：${active.map(c => c.title).join('、')}` : '正在整理下载结果…';
+    const pdf = j.chapters.find(c => c.pdf?.status === 'generating');
+    const parts = [];
+    if (active.length) parts.push(`正在下载 ${active.length} 章：${active.map(c => c.title).join('、')}`);
+    if (pdf) parts.push(`生成 PDF：${pdf.title}（${pdf.pdf.done || 0}/${pdf.images.length} 张）`);
+    j.message = parts.join('；') || '正在整理下载结果…';
   }
   async processChapter(j, c, chapterUrls) {
     await this.checkpoint(j);
@@ -102,29 +108,59 @@ export class Jobs {
     this.recount(j); this.updateMessage(j);
     await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify(c, null, 2)); await this.persist();
   }
-  async run(j) {
+  enqueuePdf(j, c, tasks) {
+    if (!j.generatePdf || c.status !== 'completed') return;
+    if (!c.pdf || c.pdf.status !== 'completed') c.pdf = { status: 'queued', file: '', error: '', done: 0, total: c.images.length, pages: 0 };
+    const task = this.pdfTail.then(async () => {
+      const directory = path.join(j.output, c.folder);
+      try {
+        await this.checkpoint(j);
+        if (c.pdf.status === 'completed') {
+          try { await fs.access(path.join(directory, c.pdf.file)); return; } catch {}
+        }
+        c.pdf = { status: 'generating', file: '', error: '', done: 0, total: c.images.length, pages: 0 };
+        this.updateMessage(j); await this.persist();
+        const file = `${c.folder}.pdf`;
+        const result = await this.pdfBuilder({ directory, images: c.images, output: path.join(directory, file), title: c.title,
+          splitLongImages: j.splitLongImages !== false,
+          checkpoint: () => this.checkpoint(j),
+          onProgress: async progress => { Object.assign(c.pdf, progress); this.updateMessage(j); await this.persist(); },
+        });
+        c.pdf = { status: 'completed', file, error: '', done: c.images.length, total: c.images.length, pages: result.pages };
+      } catch (e) {
+        c.pdf = { ...c.pdf, status: e.message === '__STOP__' ? 'pending' : 'failed', error: e.message === '__STOP__' ? '' : e.message };
+      }
+      this.updateMessage(j);
+      await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(c, null, 2)); await this.persist();
+    });
+    this.pdfTail = task.catch(() => {});
+    tasks.push(task);
+  }
+  async run(j, { pdfOnly = false } = {}) {
     j.status = 'running';
     for (const c of j.chapters) if (c.status === 'running') c.status = 'pending';
     await fs.mkdir(j.output, { recursive: true });
     const chapterUrls = j.chapters.map(c => c.url);
+    const pdfTasks = [];
     let cursor = 0;
     const worker = async () => {
       while (cursor < j.chapters.length) {
         await this.checkpoint(j);
         if (cursor >= j.chapters.length) return;
         const chapter = j.chapters[cursor++];
-        if (chapter.status === 'completed') continue;
-        await this.processChapter(j, chapter, chapterUrls);
+        if (chapter.status !== 'completed' && !pdfOnly) await this.processChapter(j, chapter, chapterUrls);
+        this.enqueuePdf(j, chapter, pdfTasks);
       }
     };
     // Old saved tasks retain their original serial behavior.
     const concurrency = Math.min(j.chapterConcurrency || 1, j.chapters.length);
     const results = await Promise.allSettled(Array.from({ length: concurrency }, worker));
-    const rejected = results.find(r => r.status === 'rejected');
+    const pdfResults = await Promise.allSettled(pdfTasks);
+    const rejected = [...results, ...pdfResults].find(r => r.status === 'rejected');
     if (rejected) throw rejected.reason;
     await this.checkpoint(j);
-    j.status = j.chapters.every(c => c.status === 'completed') ? 'completed' : 'partial';
-    j.message = j.status === 'completed' ? '全部下载完成' : '处理结束，部分章节或图片失败，可点击重试';
+    j.status = j.chapters.every(c => c.status === 'completed' && (!j.generatePdf || c.pdf?.status === 'completed')) ? 'completed' : 'partial';
+    j.message = j.status === 'completed' ? (j.generatePdf ? '图片和章节 PDF 全部完成' : '全部下载完成') : '处理结束，部分图片或 PDF 失败，可点击重试';
     await this.persist();
   }
 }

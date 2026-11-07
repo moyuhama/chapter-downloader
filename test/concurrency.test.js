@@ -7,7 +7,7 @@ import { Jobs } from '../jobs.js';
 import { sleep } from '../crawler.js';
 const gate = () => { let resolve; const promise = new Promise(r=>resolve=r); return {promise,resolve}; };
 async function until(fn) { const deadline=Date.now()+5000; while(!fn()){if(Date.now()>deadline)throw new Error('Timed out waiting for job');await sleep(10);} }
-const input=(n=4,extra={})=>({url:'https://example.com/book',title:'并发测试',chapters:Array.from({length:n},(_,i)=>({title:`第${i+1}章`,url:`https://example.com/ch/${i+1}`})),...extra});
+const input=(n=4,extra={})=>({generatePdf:false,url:'https://example.com/book',title:'并发测试',chapters:Array.from({length:n},(_,i)=>({title:`第${i+1}章`,url:`https://example.com/ch/${i+1}`})),...extra});
 async function setup(crawler) {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'chapter-concurrency-'));
   const jobs=new Jobs(root,crawler,{defaultDirectory:path.join(root,'Downloads')});await jobs.init();

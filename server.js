@@ -2,6 +2,8 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
 import { Crawler, httpUrl } from './crawler.js';
 import { Jobs } from './jobs.js';
@@ -22,6 +24,16 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
     if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader' });
     if (req.method === 'GET' && p === '/api/download-settings') return json(res, 200, { directory: defaultDownloadDirectory, separator: path.sep });
+    const pdfRequest = p.match(/^\/api\/jobs\/([^/]+)\/chapters\/(\d+)\/pdf$/);
+    if (req.method === 'GET' && pdfRequest) {
+      const job = jobs.jobs.get(pdfRequest[1]);
+      const chapter = job?.chapters.find(c => c.number === Number(pdfRequest[2]));
+      if (!chapter || chapter.pdf?.status !== 'completed') return json(res, 404, { error: 'PDF 尚未生成完成' });
+      const file = path.join(job.output, chapter.folder, chapter.pdf.file);
+      const stat = await fs.stat(file);
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': stat.size, 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(chapter.pdf.file).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`, 'X-Content-Type-Options': 'nosniff' });
+      await pipeline(createReadStream(file), res).catch(() => res.destroy()); return;
+    }
     if (req.method === 'GET' && p === '/api/jobs') return json(res, 200, jobs.list());
     if (req.method === 'GET' && p === '/api/rules') return json(res, 200, (await rules())[new URL(httpUrl(url.searchParams.get('url'))).hostname] || {});
     if (req.method === 'POST' && p.startsWith('/api/')) {
@@ -36,14 +48,14 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/login') return json(res, 200, await exclusive(async () => { const page = await crawler.page(httpUrl(b.url)); await page.bringToFront(); return { message: '已打开浏览器，请手动登录。登录完成后回到此处重新解析。' }; }));
       if (p === '/api/rules') { const all = await rules(); all[new URL(httpUrl(b.url)).hostname] = b.options; await fs.writeFile(path.join(root, 'data/rules.json'), JSON.stringify(all, null, 2)); return json(res, 200, { ok: true }); }
       if (p === '/api/jobs') { if (browserBusy) throw new Error('浏览器操作尚未结束'); return json(res, 200, await jobs.create(b)); }
-      const m = p.match(/^\/api\/jobs\/([^/]+)\/(pause|resume|stop|open)$/);
+      const m = p.match(/^\/api\/jobs\/([^/]+)\/(pause|resume|stop|open|retry-pdf)$/);
       if (m) {
         if (m[2] === 'open') {
           const job = jobs.jobs.get(m[1]); if (!job) throw new Error('任务不存在'); await fs.access(job.output);
           const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
           const child = spawn(cmd, [job.output], { stdio: 'ignore', detached: true }); child.on('error', () => {}); child.unref(); return json(res, 200, { path: job.output });
         }
-        if (browserBusy && m[2] === 'resume') throw new Error('浏览器操作尚未结束');
+        if (browserBusy && ['resume','retry-pdf'].includes(m[2])) throw new Error('浏览器操作尚未结束');
         return json(res, 200, await jobs.control(m[1], m[2]));
       }
       return json(res, 404, { error: '接口不存在' });

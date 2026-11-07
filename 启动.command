@@ -5,8 +5,8 @@ if ! command -v node >/dev/null 2>&1; then
   read -k 1 "?按任意键退出"
   exit 1
 fi
-if [[ ! -d node_modules/playwright ]]; then
-  npm install || exit 1
+if [[ ! -d node_modules/playwright || ! -d node_modules/pdfkit || ! -d node_modules/sharp ]]; then
+  npm ci || exit 1
   npm run setup || exit 1
 fi
 (sleep 2; open http://127.0.0.1:3789) &

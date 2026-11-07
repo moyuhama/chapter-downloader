@@ -39,7 +39,7 @@ test('real browser: chapter order, lazy image order, pagination, retry, persiste
     const parsed = await crawler.catalog(base);
     assert.deepEqual(parsed.chapters.map(c=>c.title),['第2章','第1章']);
     const jobs = new Jobs(root,crawler,{defaultDirectory:path.join(root,'downloads')});await jobs.init();
-    const created = await jobs.create({title:parsed.title,url:base,chapters:parsed.chapters,options:{minWidth:0,minHeight:0}});
+    const created = await jobs.create({generatePdf:false,title:parsed.title,url:base,chapters:parsed.chapters,options:{minWidth:0,minHeight:0}});
     const job = jobs.jobs.get(created.id);
     while(jobs.running.has(job.id)) await sleep(100);
     assert.equal(job.status,'partial'); assert.equal(job.done,3); assert.equal(job.failed,1);assert.equal(job.total,4);
@@ -59,7 +59,7 @@ test('stop, pause and resume keep completed files and workers do not race at end
   const fake={chapter:async()=>Array.from({length:4},(_,i)=>({url:`https://example.com/${i}.png`,pageUrl:'https://example.com/ch'})),bytes:async()=>{calls++;await sleep(80);return {type:'image/png',body:Buffer.from('test')};}};
   const jobs=new Jobs(root,fake,{defaultDirectory:path.join(root,'downloads')});await jobs.init();
   try {
-    const result=await jobs.create({url:'https://example.com',title:'test',chapters:[{title:'第1章',url:'https://example.com/ch'}]});
+    const result=await jobs.create({generatePdf:false,url:'https://example.com',title:'test',chapters:[{title:'第1章',url:'https://example.com/ch'}]});
     const job=jobs.jobs.get(result.id);
     while(calls<1) await sleep(10);await jobs.control(job.id,'pause');
     await sleep(150);const pausedCalls=calls;await sleep(100);assert.equal(calls,pausedCalls);
