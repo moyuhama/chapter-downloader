@@ -13,7 +13,7 @@ $('connectBackend').onclick = async () => {
     const result = await r.json();
     if (!r.ok || !result.ok || result.app !== 'chapter-downloader') throw new Error('未识别到下载服务');
     backendConnected = true; $('backendState').textContent = '已连接';
-    notice('本机服务已连接，可以输入网址开始采集。'); await refresh();
+    await loadDownloadDefaults(); notice('本机服务已连接，可以输入网址开始采集。'); await refresh();
   } catch (e) { backendConnected = false; $('backendState').textContent = '未连接'; notice('连接失败。请启动最新版本机程序，并检查浏览器的本地网络访问权限；也可直接打开本机界面。', true); }
   finally { $('connectBackend').disabled = false; }
 };
@@ -22,11 +22,39 @@ let currentJobId = sessionStorage.getItem('currentDownloadId');
 let currentJobStatus = '', sourceRevision = 0, rulesRequest = 0, previewRevision = 0;
 let restoreJobOnLoad = true, detachedJob = false;
 let inputUrl = $('url').value.trim();
+let outputLocked = false, directorySeparator = '/';
+function updateOutputHint(output = '') {
+  const directory = $('downloadDirectory').value.trim().replace(/[\\/]$/, '');
+  const name = $('bookTitle').value.trim();
+  const target = output || (directory && name ? directory + directorySeparator + name : '系统下载目录');
+  $('outputHint').textContent = outputLocked ? `已锁定保存位置：${target}` : `将保存到：${target}。开始下载前可修改；同名文件夹会自动加序号。`;
+}
+function setOutputLocked(locked, output = '') {
+  outputLocked = locked;
+  $('bookTitle').readOnly = locked; $('downloadDirectory').readOnly = locked;
+  $('chooseDirectory').disabled = locked || busy;
+  updateOutputHint(output);
+}
+async function loadDownloadDefaults() {
+  const settings = await api('/api/download-settings');
+  directorySeparator = settings.separator || '/';
+  if (!$('downloadDirectory').value && !outputLocked) $('downloadDirectory').value = settings.directory;
+  updateOutputHint();
+}
+$('chooseDirectory').onclick = () => task(async () => {
+  if (outputLocked) return;
+  notice('请在系统窗口中选择保存目录…');
+  const result = await api('/api/choose-directory', {});
+  if (result.directory && !outputLocked) { $('downloadDirectory').value = result.directory; updateOutputHint(); notice('保存目录已更改，开始下载前仍可调整。'); }
+  else notice('已取消选择，保存目录保持原样。');
+});
+for (const id of ['bookTitle', 'downloadDirectory']) $(id).addEventListener('input', () => updateOutputHint());
 function isCurrent(revision, url) { return revision === sourceRevision && url === $('url').value.trim(); }
 function clearPreview() { previewRevision++; $('previewResult').innerHTML = ''; }
 function resetResults() {
   sourceRevision++;
   chapters = []; parsedUrl = '';
+  setOutputLocked(false);
   $('bookTitle').value = '';
   $('chapterList').innerHTML = '';
   $('chapterCount').textContent = '';
@@ -60,8 +88,8 @@ function options() { return { mode:$('mode').value, chapterSelector:$('chapterSe
 async function task(fn) {
   if (busy) return; busy = true;
   const revision = sourceRevision;
-  const buttons = ['demo','parse','login','pickChapter','pickImage','preview','download','saveRules']; buttons.forEach(id => $(id).disabled = true);
-  try { await fn(); } catch(e) { if (revision === sourceRevision) notice(e.message, true); } finally { busy = false; buttons.forEach(id => $(id).disabled = false); }
+  const buttons = ['demo','parse','login','pickChapter','pickImage','preview','download','saveRules','chooseDirectory']; buttons.forEach(id => $(id).disabled = true);
+  try { await fn(); } catch(e) { if (revision === sourceRevision) notice(e.message, true); } finally { busy = false; buttons.forEach(id => $(id).disabled = false); $('chooseDirectory').disabled = outputLocked; }
 }
 async function loadRules() {
   const url = $('url').value.trim(); if (url === rulesUrl) return true;
@@ -86,7 +114,7 @@ $('parse').onclick = () => {
     notice('正在打开页面并识别章节，请稍候…');
     const data = await api('/api/parse', { url, options:options() });
     if (!isCurrent(revision, url)) return;
-    chapters = data.chapters.map(c => ({...c, selected:true})); parsedUrl = url; $('bookTitle').value = data.title; $('chaptersPanel').classList.remove('hidden'); renderChapters();
+    chapters = data.chapters.map(c => ({...c, selected:true})); parsedUrl = url; $('bookTitle').value = data.title; updateOutputHint(); $('chaptersPanel').classList.remove('hidden'); renderChapters();
     notice(!chapters.length ? '未找到章节。可以点选章节链接、自定义选择器，或将页面类型改为“当前页面就是一个章节”。' : data.confidence === 'review' ? `找到 ${chapters.length} 个候选链接，自动识别信心较低，请仔细核对并预览图片。` : `已识别 ${chapters.length} 个章节。请确认顺序，并预览正文图片。`, !chapters.length);
   });
 };
@@ -119,11 +147,20 @@ $('download').onclick = () => task(async () => {
   if(parsedUrl !== $('url').value.trim()) throw new Error('网址已变化，请重新解析');
   const selected = chapters.filter(c=>c.selected); if(!selected.length) throw new Error('请选择章节');
   const revision = sourceRevision, source = parsedUrl;
-  const job = await api('/api/jobs', { url:parsedUrl, title:$('bookTitle').value, chapters:selected.map(({title,url})=>({title,url})), options:options() });
-  if (!isCurrent(revision, source)) return;
-  currentJobStatus = job.status; restoreJobOnLoad = false; detachedJob = false;
-  currentJobId = job.id; sessionStorage.setItem('currentDownloadId', job.id);
-  notice('下载任务已开始。可以在下方查看进度。'); await refresh();
+  const input = { url:parsedUrl, title:$('bookTitle').value, directory:$('downloadDirectory').value.trim(), chapters:selected.map(({title,url})=>({title,url})), options:options() };
+  let started = false;
+  setOutputLocked(true);
+  try {
+    const job = await api('/api/jobs', input);
+    started = true;
+    if (!isCurrent(revision, source)) return;
+    currentJobStatus = job.status; restoreJobOnLoad = false; detachedJob = false;
+    currentJobId = job.id; sessionStorage.setItem('currentDownloadId', job.id);
+    $('bookTitle').value = job.folderName || job.title;
+    $('downloadDirectory').value = job.directory || input.directory;
+    setOutputLocked(true, job.output);
+    notice('下载任务已开始，文件夹名称和保存目录已锁定。'); await refresh();
+  } finally { if (!started && isCurrent(revision, source)) setOutputLocked(false); }
 });
 let refreshing = false;
 async function refresh() {
@@ -161,6 +198,7 @@ $('jobs').onclick = async e => {
   const b = e.target.closest('button[data-action]'); if (!b) return;
   b.disabled = true; try { const r = await api(`/api/jobs/${b.dataset.id}/${b.dataset.action}`,{}); if(b.dataset.action === 'open') notice('保存位置：' + r.path); await refresh(); } catch(e) { notice(e.message,true); } finally { b.disabled = false; }
 };
+if (!hosted) loadDownloadDefaults().catch(() => notice('请重启最新版的本机程序，以启用系统下载目录和目录选择功能。', true));
 refresh(); setInterval(refresh, 1800);
 
 $('demo').onclick = () => { $('url').value = backendBase + '/demo/'; sourceChanged(); rulesUrl = ''; $('mode').value = 'auto'; $('parse').click(); };

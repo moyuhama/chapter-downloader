@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { Crawler, httpUrl } from './crawler.js';
 import { Jobs } from './jobs.js';
 import { allowRequest } from './access.js';
+import { defaultDownloadDirectory, chooseDirectory } from './directories.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const crawler = new Crawler(path.join(root, 'data'));
 const jobs = new Jobs(root, crawler); await jobs.init();
@@ -20,10 +21,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
     if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader' });
+    if (req.method === 'GET' && p === '/api/download-settings') return json(res, 200, { directory: defaultDownloadDirectory, separator: path.sep });
     if (req.method === 'GET' && p === '/api/jobs') return json(res, 200, jobs.list());
     if (req.method === 'GET' && p === '/api/rules') return json(res, 200, (await rules())[new URL(httpUrl(url.searchParams.get('url'))).hostname] || {});
     if (req.method === 'POST' && p.startsWith('/api/')) {
       const b = await body(req);
+      if (p === '/api/choose-directory') return json(res, 200, { directory: await chooseDirectory() });
       if (p === '/api/parse') return json(res, 200, await exclusive(() => crawler.catalog(httpUrl(b.url), b.options)));
       if (p === '/api/preview') return json(res, 200, await exclusive(async () => {
         const images = await crawler.chapter(httpUrl(b.url), { ...b.options, followPages: false }, async () => {});

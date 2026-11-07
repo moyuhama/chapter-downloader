@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { httpUrl, safeName, sleep } from './crawler.js';
+import { defaultDownloadDirectory } from './directories.js';
 const terminal = new Set(['completed', 'partial', 'stopped', 'interrupted', 'failed']);
 export class Jobs {
-  constructor(root, crawler) { this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
+  constructor(root, crawler, { defaultDirectory = defaultDownloadDirectory } = {}) { this.defaultDirectory = defaultDirectory; this.creating = false; this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
   async init() {
     await fs.mkdir(path.join(this.root, 'data'), { recursive: true });
     try { const stored = JSON.parse(await fs.readFile(path.join(this.root, 'data/jobs.json'), 'utf8')); for (const job of stored) { if (!terminal.has(job.status)) job.status = 'interrupted'; this.jobs.set(job.id, job); } } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -17,15 +18,30 @@ export class Jobs {
     return this.writes;
   }
   async create(input) {
+    if (this.creating || [...this.jobs.values()].some(j => !terminal.has(j.status))) throw new Error('请先完成或停止当前任务');
+    this.creating = true;
+    try { return await this.createJob(input); } finally { this.creating = false; }
+  }
+  async createJob(input) {
     if (!Array.isArray(input.chapters) || !input.chapters.length || input.chapters.length > 5000) throw new Error('请选择 1–5000 个章节');
     const source = httpUrl(input.url); const title = safeName(input.title || '未命名作品');
+    const directory = String(input.directory || this.defaultDirectory).trim();
+    if (!path.isAbsolute(directory)) throw new Error('保存目录必须是完整的绝对路径');
     const options = input.options || {};
     for (const key of ['minWidth', 'minHeight']) if (!Number.isFinite(Number(options[key] ?? 200)) || Number(options[key] ?? 200) < 0) throw new Error('图片尺寸必须是非负数');
     const job = { id: randomUUID(), title, url: source, createdAt: new Date().toISOString(), status: 'queued', message: '等待开始', done: 0, failed: 0, total: 0,
-      output: path.join(this.root, 'downloads', title + '_' + createHash('sha256').update(source).digest('hex').slice(0, 6)),
+      directory: path.resolve(directory), folderName: title, output: '',
       options: { chapterSelector: String(options.chapterSelector || ''), imageSelector: String(options.imageSelector || ''), nextSelector: String(options.nextSelector || ''), minWidth: Number(options.minWidth ?? 200), minHeight: Number(options.minHeight ?? 200), followPages: options.followPages !== false },
       chapters: input.chapters.map((c, i) => ({ title: String(c.title || `第 ${i + 1} 章`), url: httpUrl(c.url), number: i + 1, folder: `${String(i + 1).padStart(3, '0')}_${safeName(c.title || '章节')}`, status: 'pending', images: [], error: '' })) };
     if ([...this.jobs.values()].some(j => !terminal.has(j.status))) throw new Error('请先完成或停止当前任务');
+    await fs.mkdir(job.directory, { recursive: true });
+    // Reserve a new folder atomically. A new task never overwrites an older download.
+    for (let number = 1; ; number++) {
+      const name = number === 1 ? title : `${title} (${number})`;
+      const output = path.join(job.directory, name);
+      try { await fs.mkdir(output); job.folderName = name; job.output = output; break; }
+      catch (e) { if (e.code !== 'EEXIST' || number >= 9999) throw e; }
+    }
     this.jobs.set(job.id, job); await this.persist(); this.start(job); return this.summary(job);
   }
   recount(j) { j.total = j.chapters.reduce((n,c) => n + c.images.length, 0); j.done = j.chapters.reduce((n,c) => n + c.images.filter(i => i.status === 'done').length, 0); j.failed = j.chapters.reduce((n,c) => n + c.images.filter(i => i.status === 'failed').length, 0); }

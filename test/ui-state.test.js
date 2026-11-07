@@ -26,7 +26,8 @@ async function app({ route = () => undefined, jobs = [], storedId } = {}) {
       const p=new URL(url).pathname; const input=init?.body?JSON.parse(init.body):undefined;
       let result=await route(p,input,url);
       if(result===undefined) {
-        if(p==='/api/jobs') result=jobs;
+        if(p==='/api/download-settings') result={directory:'/user/Downloads',separator:'/'};
+        else if(p==='/api/jobs') result=jobs;
         else if(p==='/api/rules') result={};
         else if(p==='/api/parse') result={title:input.url,confidence:'auto',chapters:[{title:input.url+' chapter',url:input.url+'/chapter'}]};
         else if(p==='/api/preview') result={count:1,note:'preview',images:[input.url+'/image.png']};
@@ -101,4 +102,31 @@ test('in-flight polling cannot revive old jobs, and a detached active job disapp
   job.status='running';const b=await app({jobs:[job],storedId:'old'});b.url('https://second.example/book');await b.poll();
   assert.match(b.$('jobs').innerHTML,/OLD JOB/);job.status='completed';await b.poll();
   assert.equal(b.$('jobs').innerHTML,'');assert.equal(b.$('downloadPanel').classList.contains('hidden'),true);
+});
+test('prefills default destination, allows choosing a folder and locks the final name when download starts',async()=>{
+  const pending=deferred();let payload,created;
+  const a=await app({route:(p,b)=>{
+    if(p==='/api/choose-directory')return {directory:'/custom/folder'};
+    if(p==='/api/jobs'&&b){payload=b;return pending.promise;}
+    if(p==='/api/jobs')return created?[created]:[];
+  }});
+  assert.equal(a.$('downloadDirectory').value,'/user/Downloads');
+  a.url('https://example.com/book');await a.$('parse').click();
+  assert.equal(a.$('bookTitle').readOnly,false);
+  await a.$('chooseDirectory').click();assert.equal(a.$('downloadDirectory').value,'/custom/folder');
+  a.$('bookTitle').value='自定义名称';
+  const downloading=a.$('download').click();await tick();
+  assert.equal(a.$('bookTitle').readOnly,true);assert.equal(a.$('downloadDirectory').readOnly,true);
+  assert.equal(payload.title,'自定义名称');assert.equal(payload.directory,'/custom/folder');
+  created={id:'new',title:'自定义名称',folderName:'自定义名称 (2)',directory:'/custom/folder',output:'/custom/folder/自定义名称 (2)',status:'running',chapters:[],done:0,total:0,failed:0,message:'running'};
+  pending.resolve(created);await downloading;
+  assert.equal(a.$('bookTitle').value,'自定义名称 (2)');assert.equal(a.$('bookTitle').readOnly,true);
+  assert.equal(a.$('chooseDirectory').disabled,true);assert.match(a.$('outputHint').textContent,/已锁定/);
+  a.url('https://next.example/book');await a.$('parse').click();assert.equal(a.$('bookTitle').readOnly,false);
+});
+test('a failed start unlocks name and destination for correction',async()=>{
+  const a=await app({route:(p,b)=>{if(p==='/api/jobs'&&b)throw new Error('目录不可写');}});
+  a.url('https://example.com/book');await a.$('parse').click();await a.$('download').click();
+  assert.equal(a.$('bookTitle').readOnly,false);assert.equal(a.$('downloadDirectory').readOnly,false);
+  assert.equal(a.$('chooseDirectory').disabled,false);assert.match(a.$('notice').textContent,/目录不可写/);
 });
