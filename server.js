@@ -11,7 +11,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const crawler = new Crawler(path.join(root, 'data'));
 const jobs = new Jobs(root, crawler); await jobs.init();
 let browserBusy = false;
-async function exclusive(fn) { if (browserBusy || [...jobs.jobs.values()].some(j => ['queued', 'running', 'paused'].includes(j.status))) throw new Error('浏览器正在处理其他操作，请完成或停止后再试'); browserBusy = true; try { return await fn(); } finally { browserBusy = false; } }
+async function exclusive(fn) { if (browserBusy || jobs.running.size || [...jobs.jobs.values()].some(j => ['queued', 'running', 'paused'].includes(j.status))) throw new Error('浏览器正在处理其他操作，请完成或停止后再试'); browserBusy = true; try { return await fn(); } finally { browserBusy = false; } }
 const json = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 async function body(req) { let data = ''; for await (const chunk of req) { data += chunk; if (data.length > 2e6) throw new Error('请求过大'); } return data ? JSON.parse(data) : {}; }
 async function rules() { try { return JSON.parse(await fs.readFile(path.join(root, 'data/rules.json'), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }

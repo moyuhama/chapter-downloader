@@ -130,3 +130,10 @@ test('a failed start unlocks name and destination for correction',async()=>{
   assert.equal(a.$('bookTitle').readOnly,false);assert.equal(a.$('downloadDirectory').readOnly,false);
   assert.equal(a.$('chooseDirectory').disabled,false);assert.match(a.$('notice').textContent,/目录不可写/);
 });
+test('sends the selected chapter concurrency and locks it together with the destination',async()=>{
+  let payload;
+  const a=await app({route:(p,b)=>{if(p==='/api/jobs'&&b){payload=b;return {id:'parallel',status:'running',title:b.title,directory:b.directory,folderName:b.title,output:'/target',chapterConcurrency:b.chapterConcurrency};}}});
+  a.url('https://example.com/book');await a.$('parse').click();a.$('chapterConcurrency').value='4';await a.$('download').click();
+  assert.equal(payload.chapterConcurrency,4);assert.equal(a.$('chapterConcurrency').disabled,true);
+  a.url('https://next.example/book');assert.equal(a.$('chapterConcurrency').disabled,false);
+});
