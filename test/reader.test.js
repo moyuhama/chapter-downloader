@@ -13,7 +13,7 @@ async function fixture(t){
   const source=path.join(temp,'我的作品');await fs.mkdir(source);
   const image=await sharp({create:{width:80,height:120,channels:3,background:'#a0bc80'}}).png().toBuffer();
   for(const title of ['第10章','第2章']){const dir=path.join(source,title);await fs.mkdir(dir);for(const name of ['10.png','2.png','1.png'])await fs.writeFile(path.join(dir,name),image);}
-  const reader=new Reader({stateDirectory:path.join(temp,'state'),publicDirectory,addresses:()=>['192.168.1.99']});
+  const reader=new Reader({stateDirectory:path.join(temp,'state'),publicDirectory,addresses:()=>['192.168.1.99'],sharePort:0});
   t.after(async()=>{await reader.stopShare();await fs.rm(temp,{recursive:true,force:true});});return {reader,temp,source,image};
 }
 function request(url,{method='GET',token,origin,host,route}={}){

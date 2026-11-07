@@ -18,8 +18,8 @@ export function lanAddresses() {
   return [...new Set(Object.values(os.networkInterfaces()).flat().filter(n=>n?.family==='IPv4'&&!n.internal&&privateIp(n.address)).map(n=>n.address))];
 }
 export class Reader {
-  constructor({stateDirectory,publicDirectory,addresses=lanAddresses}) {
-    this.stateDirectory=stateDirectory;this.publicDirectory=publicDirectory;this.addresses=addresses;
+  constructor({stateDirectory,publicDirectory,addresses=lanAddresses,sharePort=Number(process.env.SHIYE_READER_PORT||3790)}) {
+    this.stateDirectory=stateDirectory;this.publicDirectory=publicDirectory;this.addresses=addresses;this.sharePort=sharePort;
     this.book=null;this.sharing=null;this.opening=false;
   }
   async init() {
@@ -133,7 +133,7 @@ export class Reader {
       }catch(e){if(!res.headersSent)json(res,400,{error:e.message});else res.destroy();}
     });
     server.requestTimeout=15000;server.headersTimeout=10000;
-    await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'0.0.0.0',resolve);});
+    await new Promise((resolve,reject)=>{server.once('error',e=>reject(new Error(e.code==='EADDRINUSE'?`手机阅读端口 ${this.sharePort} 已被占用，请关闭其他助手后重试`:e.message)));server.listen(this.sharePort,'0.0.0.0',resolve);});
     try {
       const urls=ips.map(ip=>`http://${ip}:${server.address().port}/reader.html#share=${token}`);
       const qr=await QRCode.toDataURL(urls[0],{margin:2,width:256,color:{dark:'#244c40',light:'#ffffff'}});
