@@ -7,7 +7,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 // One chapter at a time is scheduled by Jobs. Images are embedded in manifest order.
-export async function generateChapterPdf({ directory, images, output, title, splitLongImages = true, checkpoint = async () => {}, onProgress = async () => {} }) {
+export async function generateChapterPdf({ directory, images, output, title, splitLongImages = true, exclusive = false, checkpoint = async () => {}, onProgress = async () => {} }) {
   if (!images.length || images.some(i => i.status !== 'done')) throw new Error('图片尚未全部下载，不能生成完整 PDF');
   const ordered = [...images].sort((a,b) => a.index - b.index);
   const temporary = output + '.' + randomUUID() + '.part';
@@ -48,7 +48,8 @@ export async function generateChapterPdf({ directory, images, output, title, spl
     }
     doc.end(); await finished;
     await checkpoint();
-    await fs.rename(temporary, output);
+    if (exclusive) { await fs.link(temporary, output); await fs.rm(temporary); }
+    else await fs.rename(temporary, output);
     return { pages };
   } catch (e) {
     doc.destroy(); await finished.catch(() => {});

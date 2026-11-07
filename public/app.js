@@ -42,6 +42,7 @@ async function loadDownloadDefaults() {
   const settings = await api('/api/download-settings');
   directorySeparator = settings.separator || '/';
   if (!$('downloadDirectory').value && !outputLocked) $('downloadDirectory').value = settings.directory;
+  if (!$('localPdfDirectory').value) $('localPdfDirectory').value = settings.directory;
   updateOutputHint();
 }
 $('chooseDirectory').onclick = () => task(async () => {
@@ -212,10 +213,101 @@ $('jobs').onclick = async e => {
   b.disabled = true; try { const r = await api(`/api/jobs/${b.dataset.id}/${b.dataset.action}`,{}); if(b.dataset.action === 'open') notice('保存位置：' + r.path); await refresh(); } catch(e) { notice(e.message,true); } finally { b.disabled = false; }
 };
 if (!hosted) loadDownloadDefaults().catch(() => notice('请重启最新版的本机程序，以启用系统下载目录和目录选择功能。', true));
-refresh(); setInterval(refresh, 1800);
+refresh(); setInterval(() => { refresh(); refreshLocalPdf(); }, 1800);
 
 $('demo').onclick = () => { $('url').value = backendBase + '/demo/'; sourceChanged(); rulesUrl = ''; $('mode').value = 'auto'; $('parse').click(); };
 
 for (const id of ['chapterSelector','imageSelector','nextSelector','minWidth','minHeight','followPages','mode']) {
   $(id).addEventListener('change', clearPreview);
 }
+
+
+// Independent local converter: no website or download task is needed.
+let localImages = [], localRevision = 0, localPdfBusy = false, localPdfWorking = false, localPdfPolling = false;
+let localPdfId = sessionStorage.getItem('currentLocalPdfId');
+const intro = ['.intro h1','.intro p','.flow','.eyebrow','.small-note'].map(selector => document.querySelector(selector));
+const originalIntro = intro.map(el => el.innerHTML);
+function selectTool(local) {
+  $('collectorTool').classList.toggle('hidden',local); $('localPdfTool').classList.toggle('hidden',!local);
+  $('showCollector').setAttribute('aria-pressed',String(!local)); $('showLocalPdf').setAttribute('aria-pressed',String(local));
+  const text = ['本地图片，<br>一键成册<span>。</span>','选择图片、确认顺序，直接生成 PDF。<br>无需网址，原始图片保持不变。','<span>01 选择图片</span><b>→</b><span>02 确认顺序</span><b>→</b><span>03 生成 PDF</span>','让图片，变成一本书','支持常见图片格式与长图分页<br>图片读取和 PDF 生成均在本机完成'];
+  intro.forEach((el,i) => el.innerHTML = local ? text[i] : originalIntro[i]);
+  if (typeof history !== 'undefined') history.replaceState(null,'',local?'#pdf':location.pathname || './');
+}
+$('showCollector').onclick = () => selectTool(false); $('showLocalPdf').onclick = () => selectTool(true);
+if (location.hash === '#pdf') selectTool(true);
+function localNotice(message,error=false) { $('localPdfNotice').textContent=message; $('localPdfNotice').classList.toggle('error',error); }
+function localLocks() {
+  for (const id of ['localPdfScan','localPdfPickSource','localPdfPickOutput','localPdfStart','localPdfReverse']) $(id).disabled=localPdfBusy||localPdfWorking;
+  for (const id of ['localPdfSource','localPdfName','localPdfDirectory']) $(id).readOnly=localPdfWorking||localPdfBusy;
+  for (const id of ['localPdfSplit','localPdfAll']) $(id).disabled=localPdfWorking||localPdfBusy;
+}
+function clearLocalResult() {
+  if(localPdfWorking)return;
+  localPdfId=null;sessionStorage.removeItem('currentLocalPdfId');$('localPdfResult').innerHTML='';$('localPdfResult').classList.add('hidden');
+}
+function clearLocalSource() {
+  if(localPdfWorking)return;
+  localRevision++;localImages=[];$('localPdfSettings').classList.add('hidden');$('localPdfFiles').innerHTML='';$('localPdfName').value='';clearLocalResult();
+  localNotice('图片文件夹已更换，请读取图片。');
+}
+$('localPdfSource').addEventListener('input',clearLocalSource);
+for(const id of ['localPdfName','localPdfDirectory','localPdfSplit']) $(id).addEventListener('input',clearLocalResult);
+async function localAction(fn) {
+  if(localPdfBusy||localPdfWorking)return;
+  localPdfBusy=true;localLocks();
+  try{await fn();}catch(e){localNotice(e.message,true);}finally{localPdfBusy=false;localLocks();}
+}
+function localSelected() {
+  $('localPdfCount').textContent=`已选 ${localImages.filter(i=>i.selected).length} / ${localImages.length} 张`;
+  $('localPdfAll').checked=localImages.length>0&&localImages.every(i=>i.selected);
+  $('localPdfAll').indeterminate=localImages.some(i=>i.selected)&&!localImages.every(i=>i.selected);
+}
+function renderLocalImages() {
+  $('localPdfFiles').innerHTML=localImages.map((item,i)=>`<div class="local-image"><input aria-label="选择 ${escape(item.name)}" type="checkbox" data-local-index="${i}" ${item.selected?'checked':''} ${localPdfWorking?'disabled':''}><span class="number">${String(i+1).padStart(3,'0')}</span><span class="filename" title="${escape(item.name)}">${escape(item.name)}</span><button data-move="-1" data-local-index="${i}" aria-label="上移 ${escape(item.name)}" ${i===0||localPdfWorking?'disabled':''}>↑</button><button data-move="1" data-local-index="${i}" aria-label="下移 ${escape(item.name)}" ${i===localImages.length-1||localPdfWorking?'disabled':''}>↓</button></div>`).join('');localSelected();
+}
+$('localPdfFiles').onchange=e=>{if(localPdfWorking||localPdfBusy||e.target.dataset.localIndex===undefined)return;localImages[Number(e.target.dataset.localIndex)].selected=e.target.checked;clearLocalResult();localSelected();};
+$('localPdfFiles').onclick=e=>{
+  if(localPdfWorking||localPdfBusy)return;const b=e.target.closest('button[data-move]');if(!b)return;const i=Number(b.dataset.localIndex),next=i+Number(b.dataset.move);
+  if(next<0||next>=localImages.length)return;[localImages[i],localImages[next]]=[localImages[next],localImages[i]];clearLocalResult();renderLocalImages();
+};
+$('localPdfAll').onchange=()=>{if(localPdfWorking)return;localImages.forEach(i=>i.selected=$('localPdfAll').checked);clearLocalResult();renderLocalImages();};
+$('localPdfReverse').onclick=()=>{if(localPdfWorking)return;localImages.reverse();clearLocalResult();renderLocalImages();};
+async function scanLocalImages() {
+  const revision=localRevision,source=$('localPdfSource').value.trim();
+  localNotice('正在读取图片列表…');let result;
+  try{result=await api('/api/local-images',{source});}catch(e){if(revision===localRevision&&source===$('localPdfSource').value.trim())throw e;return;}
+  if(revision!==localRevision||source!==$('localPdfSource').value.trim())return;
+  localImages=result.files.map(f=>({...f,selected:true}));$('localPdfSource').value=result.directory;$('localPdfName').value=result.name;
+  $('localPdfSettings').classList.remove('hidden');renderLocalImages();localNotice(`已读取 ${localImages.length} 张图片，请确认顺序和保存位置。`);
+}
+$('localPdfScan').onclick=()=>localAction(async()=>{clearLocalResult();localRevision++;localImages=[];$('localPdfSettings').classList.add('hidden');await scanLocalImages();});
+$('localPdfPickSource').onclick=()=>localAction(async()=>{
+  localNotice('请在系统窗口中选择直接包含图片的文件夹…');const result=await api('/api/choose-directory',{});
+  if(!result.directory){localNotice('已取消选择。');return;}$('localPdfSource').value=result.directory;clearLocalSource();await scanLocalImages();
+});
+$('localPdfPickOutput').onclick=()=>localAction(async()=>{const result=await api('/api/choose-directory',{});if(result.directory){clearLocalResult();$('localPdfDirectory').value=result.directory;}});
+$('localPdfStart').onclick=()=>localAction(async()=>{
+  const files=localImages.filter(i=>i.selected).map(i=>i.name);if(!files.length)throw new Error('请先读取并选择图片');
+  const revision=localRevision;const task=await api('/api/conversions',{source:$('localPdfSource').value.trim(),directory:$('localPdfDirectory').value.trim(),name:$('localPdfName').value,files,splitLongImages:$('localPdfSplit').checked});
+  if(revision!==localRevision)return;localPdfId=task.id;sessionStorage.setItem('currentLocalPdfId',task.id);renderLocalTask(task);renderLocalImages();
+});
+function renderLocalTask(task) {
+  const wasWorking=localPdfWorking;localPdfWorking=['queued','generating','stopping'].includes(task.status);localLocks();
+  if(wasWorking!==localPdfWorking)renderLocalImages();
+  const names={queued:'等待生成',generating:'正在生成 PDF',completed:'转换完成',failed:'转换失败',stopped:'已取消',stopping:'正在取消'};
+  $('localPdfResult').classList.remove('hidden');
+  $('localPdfResult').innerHTML=`<div class="job-top"><strong>${escape(task.name)}</strong><span class="status ${task.status}">${names[task.status]||task.status}</span></div><div class="progress"><i style="width:${task.status==='completed'?100:Math.round(task.done/task.total*95)}%"></i></div><div class="job-message">已处理 ${task.done} / ${task.total} 张图片 · ${task.pages} 页</div><div class="job-path">${escape(task.output)}</div>${task.error?`<div class="notice error">${escape(task.error)}</div>`:''}<div class="job-actions">${localPdfWorking?'<button data-local-action="stop">取消转换</button>':''}${task.status==='completed'?`<a class="pdf-link" target="_blank" rel="noopener noreferrer" href="${backendBase}/api/conversions/${encodeURIComponent(task.id)}/pdf">打开 PDF ↗</a><button data-local-action="open">打开所在目录 ↗</button>`:''}</div>`;
+  localNotice(task.status==='completed'?'PDF 已生成，原始图片保持不变。':task.status==='failed'?'转换失败，可检查图片或修改设置后重新生成。':task.status==='queued'?'已加入 PDF 生成队列，请稍候…':names[task.status]||'正在转换…');
+}
+async function refreshLocalPdf() {
+  if(!localPdfId||!backendConnected||localPdfPolling)return;localPdfPolling=true;const id=localPdfId,revision=localRevision;
+  try{const task=await api(`/api/conversions/${encodeURIComponent(id)}`);if(id===localPdfId&&revision===localRevision)renderLocalTask(task);}
+  catch(e){if(id===localPdfId&&revision===localRevision){localPdfWorking=false;clearLocalResult();localLocks();localNotice('无法读取转换状态，请重新选择图片或重启最新版本机程序。',true);}}
+  finally{localPdfPolling=false;}
+}
+$('localPdfResult').onclick=async e=>{
+  const b=e.target.closest('button[data-local-action]');if(!b||!localPdfId)return;b.disabled=true;
+  try{const task=await api(`/api/conversions/${encodeURIComponent(localPdfId)}/${b.dataset.localAction}`,{});if(b.dataset.localAction==='stop')renderLocalTask(task);else localNotice('PDF 保存目录：'+task.path);}catch(e){localNotice(e.message,true);}finally{b.disabled=false;}
+};
+refreshLocalPdf();

@@ -7,16 +7,26 @@ import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
 import { Crawler, httpUrl } from './crawler.js';
 import { Jobs } from './jobs.js';
+import { PdfQueue } from './pdf-queue.js';
+import { LocalPdf, scanImageDirectory } from './local-pdf.js';
 import { allowRequest } from './access.js';
 import { defaultDownloadDirectory, chooseDirectory } from './directories.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const crawler = new Crawler(path.join(root, 'data'));
-const jobs = new Jobs(root, crawler); await jobs.init();
+const pdfQueue = new PdfQueue();
+const converter = new LocalPdf({ pdfQueue });
+const jobs = new Jobs(root, crawler, { pdfQueue }); await jobs.init();
 let browserBusy = false;
 async function exclusive(fn) { if (browserBusy || jobs.running.size || [...jobs.jobs.values()].some(j => ['queued', 'running', 'paused'].includes(j.status))) throw new Error('浏览器正在处理其他操作，请完成或停止后再试'); browserBusy = true; try { return await fn(); } finally { browserBusy = false; } }
 const json = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 async function body(req) { let data = ''; for await (const chunk of req) { data += chunk; if (data.length > 2e6) throw new Error('请求过大'); } return data ? JSON.parse(data) : {}; }
 async function rules() { try { return JSON.parse(await fs.readFile(path.join(root, 'data/rules.json'), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }
+async function servePdf(res, file) {
+  const stat = await fs.stat(file);
+  const filename = encodeURIComponent(path.basename(file)).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  res.writeHead(200, { 'Content-Type':'application/pdf', 'Content-Length':stat.size, 'Content-Disposition':`inline; filename*=UTF-8''${filename}`, 'X-Content-Type-Options':'nosniff' });
+  await pipeline(createReadStream(file),res).catch(()=>res.destroy());
+}
 const server = http.createServer(async (req, res) => {
   try {
     if (!allowRequest(req, res)) return json(res, 403, { error: '仅允许本机界面或已配置的 GitHub Pages 页面访问' });
@@ -24,20 +34,38 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
     if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader' });
     if (req.method === 'GET' && p === '/api/download-settings') return json(res, 200, { directory: defaultDownloadDirectory, separator: path.sep });
+    const conversion = p.match(/^\/api\/conversions\/([^/]+)(?:\/(pdf|stop|open))?$/);
+    if (req.method === 'GET' && conversion) {
+      const task = converter.get(conversion[1]);
+      if (conversion[2] === 'pdf') {
+        if(task.status!=='completed')return json(res,404,{error:'PDF 尚未生成完成'});
+        await servePdf(res, task.output); return;
+      }
+      return json(res,200,task);
+    }
     const pdfRequest = p.match(/^\/api\/jobs\/([^/]+)\/chapters\/(\d+)\/pdf$/);
     if (req.method === 'GET' && pdfRequest) {
       const job = jobs.jobs.get(pdfRequest[1]);
       const chapter = job?.chapters.find(c => c.number === Number(pdfRequest[2]));
       if (!chapter || chapter.pdf?.status !== 'completed') return json(res, 404, { error: 'PDF 尚未生成完成' });
       const file = path.join(job.output, chapter.folder, chapter.pdf.file);
-      const stat = await fs.stat(file);
-      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': stat.size, 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(chapter.pdf.file).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`, 'X-Content-Type-Options': 'nosniff' });
-      await pipeline(createReadStream(file), res).catch(() => res.destroy()); return;
+      await servePdf(res, file); return;
     }
     if (req.method === 'GET' && p === '/api/jobs') return json(res, 200, jobs.list());
     if (req.method === 'GET' && p === '/api/rules') return json(res, 200, (await rules())[new URL(httpUrl(url.searchParams.get('url'))).hostname] || {});
     if (req.method === 'POST' && p.startsWith('/api/')) {
       const b = await body(req);
+      if (p === '/api/local-images') return json(res,200,await scanImageDirectory(b.source));
+      if (p === '/api/conversions') return json(res,200,await converter.create(b));
+      if (conversion) {
+        if(conversion[2]==='stop')return json(res,200,converter.stop(conversion[1]));
+        if(conversion[2]==='open'){
+          const task=converter.get(conversion[1]);await fs.access(task.directory);
+          const command=process.platform==='darwin'?'open':process.platform==='win32'?'explorer.exe':'xdg-open';
+          const child=spawn(command,[task.directory],{stdio:'ignore',detached:true});child.on('error',()=>{});child.unref();return json(res,200,{path:task.directory});
+        }
+        return json(res,404,{error:'接口不存在'});
+      }
       if (p === '/api/choose-directory') return json(res, 200, { directory: await chooseDirectory() });
       if (p === '/api/parse') return json(res, 200, await exclusive(() => crawler.catalog(httpUrl(b.url), b.options)));
       if (p === '/api/preview') return json(res, 200, await exclusive(async () => {

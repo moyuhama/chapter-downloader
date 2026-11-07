@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { httpUrl, safeName, sleep } from './crawler.js';
 import { defaultDownloadDirectory } from './directories.js';
 import { generateChapterPdf } from './pdf.js';
+import { PdfQueue } from './pdf-queue.js';
 const terminal = new Set(['completed', 'partial', 'stopped', 'interrupted', 'failed']);
 export class Jobs {
-  constructor(root, crawler, { defaultDirectory = defaultDownloadDirectory, pdfBuilder = generateChapterPdf } = {}) { this.pdfBuilder = pdfBuilder; this.pdfTail = Promise.resolve(); this.defaultDirectory = defaultDirectory; this.creating = false; this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
+  constructor(root, crawler, { defaultDirectory = defaultDownloadDirectory, pdfBuilder = generateChapterPdf, pdfQueue = new PdfQueue() } = {}) { this.pdfBuilder = pdfBuilder; this.pdfQueue = pdfQueue; this.defaultDirectory = defaultDirectory; this.creating = false; this.root = root; this.crawler = crawler; this.jobs = new Map(); this.writes = Promise.resolve(); this.running = new Set(); }
   async init() {
     await fs.mkdir(path.join(this.root, 'data'), { recursive: true });
     try { const stored = JSON.parse(await fs.readFile(path.join(this.root, 'data/jobs.json'), 'utf8')); for (const job of stored) { if (!terminal.has(job.status)) job.status = 'interrupted'; this.jobs.set(job.id, job); } } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -111,7 +112,7 @@ export class Jobs {
   enqueuePdf(j, c, tasks) {
     if (!j.generatePdf || c.status !== 'completed') return;
     if (!c.pdf || c.pdf.status !== 'completed') c.pdf = { status: 'queued', file: '', error: '', done: 0, total: c.images.length, pages: 0 };
-    const task = this.pdfTail.then(async () => {
+    const task = this.pdfQueue.run(async () => {
       const directory = path.join(j.output, c.folder);
       try {
         await this.checkpoint(j);
@@ -133,7 +134,6 @@ export class Jobs {
       this.updateMessage(j);
       await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(c, null, 2)); await this.persist();
     });
-    this.pdfTail = task.catch(() => {});
     tasks.push(task);
   }
   async run(j, { pdfOnly = false } = {}) {

@@ -9,11 +9,11 @@ export async function chooseDirectory() {
   try {
     let result;
     if (process.platform === 'darwin') {
-      result = await run('osascript', ['-e', 'POSIX path of (choose folder with prompt "选择图片保存目录")'], options);
+      result = await run('osascript', ['-e', 'POSIX path of (choose folder with prompt "选择图片文件夹或保存目录")'], options);
     } else if (process.platform === 'win32') {
-      result = await run('powershell.exe', ['-NoProfile', '-STA', '-Command', "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择图片保存目录'; if ($dialog.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.SelectedPath }"], options);
+      result = await run('powershell.exe', ['-NoProfile', '-STA', '-Command', "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择图片文件夹或保存目录'; if ($dialog.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.SelectedPath }"], options);
     } else {
-      result = await run('zenity', ['--file-selection', '--directory', '--title=选择图片保存目录'], options);
+      result = await run('zenity', ['--file-selection', '--directory', '--title=选择图片文件夹或保存目录'], options);
     }
     return result.stdout.trim() || null;
   } catch (e) {

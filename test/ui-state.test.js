@@ -9,6 +9,7 @@ function element() {
   const classes = new Set(['hidden']);
   return { value:'', checked:false, indeterminate:false, innerHTML:'', textContent:'', disabled:false, dataset:{}, listeners:{},
     classList:{add:c=>classes.add(c),remove:c=>classes.delete(c),contains:c=>classes.has(c),toggle(c,on){ if(on??!classes.has(c))classes.add(c);else classes.delete(c); }},
+    setAttribute(name,value){this[name]=value;},
     addEventListener(name,fn){ (this.listeners[name]??=[]).push(fn); },
     emit(name){ for(const fn of this.listeners[name]||[]) fn({target:this}); }, click(){ return this.onclick?.(); }
   };
@@ -151,4 +152,23 @@ test('PDF failure and completed chapter links render separately from image downl
   ]};
   const a=await app({jobs:[job],storedId:'pdfjob'});const html=a.$('jobs').innerHTML;
   assert.match(html,/data-action="retry-pdf"/);assert.match(html,/bad &lt;tag&gt;/);assert.match(html,/\/api\/jobs\/pdfjob\/chapters\/2\/pdf/);assert.match(html,/2 页/);
+});
+test('local PDF tool works without parsing a URL, preserves chosen order and clears old results when source changes',async()=>{
+  let payload,task;
+  const a=await app({route:(p,b)=>{
+    if(p==='/api/local-images')return {directory:b.source,name:'本地章节',files:[{name:'1.png'},{name:'2.png'},{name:'10.png'}]};
+    if(p==='/api/conversions'){payload=b;task={id:'local',name:'自定义.pdf',status:'generating',done:0,total:b.files.length,pages:0,output:'/out/自定义.pdf'};return task;}
+    if(p==='/api/conversions/local')return task;
+  }});
+  a.$('showLocalPdf').click();assert.equal(a.$('collectorTool').classList.contains('hidden'),true);
+  assert.equal(a.$('localPdfDirectory').value,'/user/Downloads');
+  a.$('localPdfSource').value='/images';await a.$('localPdfScan').click();assert.equal(a.$('localPdfName').value,'本地章节');
+  a.$('localPdfReverse').click();a.$('localPdfName').value='自定义';await a.$('localPdfStart').click();
+  assert.deepEqual(payload.files,['10.png','2.png','1.png']);assert.equal(payload.source,'/images');assert.equal(a.$('localPdfSource').readOnly,true);
+  task={...task,status:'completed',done:3,pages:3};await a.poll();assert.match(a.$('localPdfResult').innerHTML,/打开 PDF/);assert.equal(a.$('localPdfSource').readOnly,false);
+  a.$('localPdfSource').value='/new-images';a.$('localPdfSource').emit('input');assert.equal(a.$('localPdfResult').innerHTML,'');assert.equal(a.$('localPdfSettings').classList.contains('hidden'),true);
+});
+test('local folder scan failures are shown and do not leave a stale image list',async()=>{
+  const a=await app({route:p=>{if(p==='/api/local-images')throw new Error('没有支持的图片');}});
+  a.$('localPdfSource').value='/empty';await a.$('localPdfScan').click();assert.match(a.$('localPdfNotice').textContent,/没有支持/);assert.equal(a.$('localPdfSettings').classList.contains('hidden'),true);
 });
