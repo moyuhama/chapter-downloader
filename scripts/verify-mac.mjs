@@ -24,9 +24,15 @@ try {
   const conversion=await (await fetch(`http://127.0.0.1:${port}/api/conversions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,directory:path.join(home,'out'),files:['001.png'],name:'bundle-test'})})).json();
   let status;for(let i=0;i<100;i++){status=await (await fetch(`http://127.0.0.1:${port}/api/conversions/${conversion.id}`)).json();if(status.status==='completed'||status.status==='failed')break;await new Promise(r=>setTimeout(r,50));}
   assert.equal(status.status,'completed');assert.equal(status.pages,1);
+  assert.equal(started.capabilities.reader,true);
+  const opened=await (await fetch(`http://127.0.0.1:${port}/api/reader/open`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})})).json();
+  assert.equal(opened.total,1);assert.equal(opened.chapters.length,1);
+  const page=await fetch(`http://127.0.0.1:${port}/reader.html`);assert.equal(page.status,200);
+  const image=await fetch(`http://127.0.0.1:${port}/api/reader/image/0/0?book=${opened.id}`);assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');
+  await image.arrayBuffer();
   process.env.PLAYWRIGHT_BROWSERS_PATH=path.join(app,'browsers');
   const {chromium}=createRequire(path.join(app,'package.json'))('playwright');await fs.access(chromium.executablePath());
   const browser=await chromium.launch({headless:true,executablePath:chromium.executablePath()});await browser.close();
   await run(node,[cli,'stop'],{env,timeout:10000});
-  console.log(JSON.stringify({arch:process.arch,check,service:'start/stop passed',pdf:'passed',bundledBrowser:'passed',protocolValidation:'passed'}));
+  console.log(JSON.stringify({arch:process.arch,check,service:'start/stop passed',pdf:'passed',reader:'passed',bundledBrowser:'passed',protocolValidation:'passed'}));
 }finally{await run(node,[cli,'stop'],{env,timeout:10000}).catch(()=>{});await fs.rm(home,{recursive:true,force:true});}

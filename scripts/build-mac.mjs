@@ -14,7 +14,7 @@ const staging=await fs.mkdtemp(path.join(output,'build-'));
 const bundle=path.join(staging,'拾页助手.app');
 const contents=path.join(bundle,'Contents'),resources=path.join(contents,'Resources'),app=path.join(resources,'app');
 await fs.mkdir(path.join(contents,'MacOS'),{recursive:true});await fs.mkdir(app,{recursive:true});
-const files=['server.js','crawler.js','jobs.js','directories.js','access.js','service-state.js','pdf.js','pdf-queue.js','local-pdf.js','package.json','package-lock.json','public','launcher/cli.mjs'];
+const files=['server.js','reader.js','crawler.js','jobs.js','directories.js','access.js','service-state.js','pdf.js','pdf-queue.js','local-pdf.js','package.json','package-lock.json','public','launcher/cli.mjs'];
 for(const file of files){await fs.mkdir(path.dirname(path.join(app,file)),{recursive:true});await fs.cp(path.join(root,file),path.join(app,file),{recursive:true,verbatimSymlinks:true});}
 await fs.cp(path.join(root,'node_modules'),path.join(app,'node_modules'),{recursive:true,verbatimSymlinks:true});
 await fs.copyFile(process.execPath,path.join(resources,'node'));await fs.chmod(path.join(resources,'node'),0o755);

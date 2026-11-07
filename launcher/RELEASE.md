@@ -1,3 +1,5 @@
+本版新增电脑 / 手机图片阅读器、阅读进度恢复、单页翻页，以及带二维码的局域网只读手机阅读。旧版用户需下载本版 ZIP，解压并双击打开应用完成更新。
+
 Mac 通用预览版，支持 macOS 14 及以上的 Apple 芯片和 Intel 电脑。
 
 下载 ZIP 后解压，打开「拾页助手.app」。工具会部署到 ~/Applications/拾页助手.app，数据存放在 ~/Library/Application Support/Shiye；不依赖源码项目、系统 Node 或手动 npm 安装。包含 Node、图片/PDF依赖及 Chromium。
