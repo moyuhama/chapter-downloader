@@ -1,0 +1,20 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
+const run=promisify(execFile),root=process.cwd();
+const input=path.resolve(process.argv[2]||'.artifacts/architecture-builds');
+const output=path.resolve('.artifacts/releases');await fs.mkdir(output,{recursive:true});
+const staging=await fs.mkdtemp(path.join(output,'universal-'));
+for(const arch of ['arm64','x64']){await fs.mkdir(path.join(staging,arch));await run('ditto',['-x','-k',path.join(input,`shiye-macos-${arch}.zip`),path.join(staging,arch)]);}
+const bundle=path.join(staging,'拾页助手.app'),contents=path.join(bundle,'Contents');
+await fs.mkdir(path.join(contents,'MacOS'),{recursive:true});await fs.mkdir(path.join(contents,'Resources'),{recursive:true});
+await fs.copyFile(path.join(staging,'arm64','拾页助手.app','Contents','Info.plist'),path.join(contents,'Info.plist'));
+for(const arch of ['arm64','x64'])await fs.cp(path.join(staging,arch,'拾页助手.app','Contents','Resources'),path.join(contents,'Resources',arch),{recursive:true,verbatimSymlinks:true});
+await run('lipo',['-create',...['arm64','x64'].map(arch=>path.join(staging,arch,'拾页助手.app','Contents','MacOS','ShiyeHelper')),'-output',path.join(contents,'MacOS','ShiyeHelper')]);
+await run('codesign',['--force','--sign','-',bundle]);
+const zip=path.join(output,'shiye-macos-universal.zip');await fs.rm(zip,{force:true});
+await run('ditto',['-c','-k','--sequesterRsrc','--keepParent',bundle,zip]);
+const hash=createHash('sha256').update(await fs.readFile(zip)).digest('hex');await fs.writeFile(zip+'.sha256',`${hash}  shiye-macos-universal.zip\n`);
+const result={bundle,zip,signature:'ad-hoc, not notarized'};await fs.writeFile(path.join(output,'merge-result.json'),JSON.stringify(result));console.log(JSON.stringify(result));

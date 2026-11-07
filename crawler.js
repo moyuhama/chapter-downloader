@@ -15,7 +15,7 @@ export class Crawler {
   constructor(root) { this.root = root; this.context = null; this.launching = null; }
   async browser() {
     if (!this.launching) this.launching = chromium.launchPersistentContext(path.join(this.root, 'browser'), {
-      headless: process.env.CRAWLER_HEADLESS === '1', viewport: { width: 1280, height: 900 }, acceptDownloads: false,
+      headless: process.env.CRAWLER_HEADLESS === '1', executablePath: process.env.SHIYE_BROWSER_EXECUTABLE || undefined, viewport: { width: 1280, height: 900 }, acceptDownloads: false,
     }).then(c => { this.context = c; c.on('close', () => { this.launching = null; this.context = null; }); return c; }).catch(e => { this.launching = null; throw new Error(`浏览器启动失败，请先运行 npm run setup。${e.message}`); });
     return this.launching;
   }

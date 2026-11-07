@@ -29,6 +29,22 @@ GitHub Pages 仅托管前端，不能执行 Node.js 或启动 Chromium。使用�
 
 GitHub Actions 会在 `main` 分支的 `public/` 改动后发布 Pages。后台代码更新后，需要在本机执行 `git pull`、`npm ci` 并重新启动程序；只刷新 Pages 网页不会更新本机后台。
 
+## 网页启动助手（Mac 预览版）
+
+Pages 顶部提供「启动并连接」「断开并停止服务」。首次点击后检测本机服务；未连接时尝试 `shiye://start`，显示下载、解压和打开安装包的引导，并在首次等待后发起下载。网页不会把“请求下载”误报成“下载完成”，实际下载状态以浏览器下载列表为准。
+
+- Mac 通用包支持 macOS 14 及以上，包含 Apple 芯片和 Intel 两套运行环境、Node、Chromium 与图片/PDF依赖。无需保留源码项目或安装系统 Node。
+- 首次需要用户打开下载的 ZIP 并运行「拾页助手.app」。程序复制到 `~/Applications/拾页助手.app`，注册 `shiye://start`；数据、登录配置和日志位于 `~/Library/Application Support/Shiye`，下载结果仍按用户选择的目录保存。
+- 再次使用从网页点击启动即可请求系统唤起，已有同版本服务会复用。浏览器或系统仍可能询问是否打开助手。
+- 点击停止会校验当前服务实例、保存下载检查点、取消并清理未完成的 PDF、关闭浏览器并退出；不会停止其他程序。关闭标签页本身不等于停止服务。
+- 浏览器没有直接判断本机是否已安装助手的通用能力。超时只显示未连接，页面同时保留重新下载和启动已安装助手入口。已发起过下载后不再自动重复下载。
+- **此预览包只有 ad-hoc 签名，尚无 Apple Developer ID 签名和公证，Gatekeeper 可能阻止首次打开。若被拦截请暂用源码方式，不要关闭系统安全保护。正式免拦截分发仍需开发者证书与公证。**
+- Windows 暂无启动安装包，仍可按下面的源码方式运行。
+
+源码命令行也支持：`node launcher/cli.mjs start`、`node launcher/cli.mjs stop`、`node launcher/cli.mjs status`。命令行使用固定助手数据目录，与 `npm start` 的项目内数据分开。
+
+构建：`npm run package:mac`；GitHub 的 Build Mac Helper 工作流分别构建并验证两种架构，再合并、验证通用包并发布预览版。包与 SHA-256 校验文件位于 GitHub Releases。发布下载链接只在构建成功后启用。
+
 ## 启动
 
 需要 Node.js 20 或更高版本。首次使用：

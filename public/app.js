@@ -2,21 +2,90 @@ const $ = id => document.getElementById(id);
 const hosted = !['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
 const backendBase = hosted ? 'http://127.0.0.1:3789' : location.origin;
 let backendConnected = !hosted;
-if (hosted) {
-  $('backendPanel').classList.remove('hidden');
-  document.querySelector('.local').innerHTML = '<i></i> Pages 界面 · 本机采集';
+let serviceInstance = null, serviceEpoch = 0, startupActive = false, serviceStopRequested = false;
+let serviceHasProbed = !hosted, serviceProbeBusy = false, lastServiceProbe = 0, startupTimer = null;
+if (hosted) document.querySelector('.local').innerHTML = '<i></i> Pages 界面 · 本机采集';
+function serviceUi(connected, text = '') {
+  $('backendState').textContent = text || (connected ? '已连接' : '未连接');
+  $('connectBackend').textContent = connected ? '重新检测连接' : '启动并连接';
+  $('disconnectBackend').disabled = !connected || !serviceInstance?.capabilities?.shutdown;
 }
-$('connectBackend').onclick = async () => {
-  $('connectBackend').disabled = true;
+async function probeService() {
+  const r = await fetch(backendBase + '/api/health', { signal: AbortSignal.timeout(1500) });
+  const result = await r.json();
+  if (!r.ok || !result.ok || result.app !== 'chapter-downloader') throw new Error('未识别到本机助手');
+  return result;
+}
+async function attachService(result, epoch) {
+  if (epoch !== serviceEpoch || serviceStopRequested) return;
+  if (result.state === 'stopping') { serviceUi(false,'正在停止'); return; }
+  const wasWaiting = startupActive || !backendConnected;
+  serviceInstance = result; backendConnected = true; startupActive = false;
+  if (startupTimer) clearTimeout(startupTimer);
+  $('helperGuide').classList.add('hidden'); serviceUi(true);
+  if (wasWaiting) { await loadDownloadDefaults(); notice('本机助手已连接，可以使用。'); await refresh(); }
+}
+function showHelperGuide(message) {
+  $('helperGuide').classList.remove('hidden'); $('helperGuideStatus').textContent = message;
+}
+function macSupported() { return typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent || navigator.platform || ''); }
+async function downloadHelper() {
+  if (!macSupported()) { $('helperDownloadState').textContent='当前安装包支持 Mac；其他系统请使用源码方式启动。'; return; }
+  $('downloadHelper').disabled=true;
   try {
-    const r = await fetch(backendBase + '/api/health', { signal: AbortSignal.timeout(8000) });
-    const result = await r.json();
-    if (!r.ok || !result.ok || result.app !== 'chapter-downloader') throw new Error('未识别到下载服务');
-    backendConnected = true; $('backendState').textContent = '已连接';
-    await loadDownloadDefaults(); notice('本机服务已连接，可以输入网址开始采集。'); await refresh();
-  } catch (e) { backendConnected = false; $('backendState').textContent = '未连接'; notice('连接失败。请启动最新版本机程序，并检查浏览器的本地网络访问权限；也可直接打开本机界面。', true); }
-  finally { $('connectBackend').disabled = false; }
+    const response=await fetch('./helper-release.json',{cache:'no-store'}); const manifest=await response.json();
+    if(!response.ok||!manifest.ready)throw new Error('安装包正在准备，请稍后重试。');
+    const url=new URL(manifest.macUniversal);
+    if(url.origin!=='https://github.com'||!url.pathname.startsWith('/moyuhama/chapter-downloader/releases/download/'))throw new Error('安装包地址无效');
+    const link=document.createElement('a');link.href=url.href;link.download='shiye-macos-universal.zip';document.body.append(link);link.click();link.remove();
+    try{localStorage.setItem('shiye-helper-downloaded',manifest.version);}catch{}
+    $('helperDownloadState').textContent='已发起下载。下载完成后，点击浏览器右上角的下载列表，打开 ZIP，再双击「拾页助手.app」。';
+  } catch(e){$('helperDownloadState').textContent=e.message;} finally{$('downloadHelper').disabled=false;}
+}
+function waitForHelper(autoDownload) {
+  const epoch=serviceEpoch; startupActive=true; serviceHasProbed=true; serviceUi(false,'等待助手启动');
+  showHelperGuide('正在尝试启动助手；首次使用请按下方步骤完成安装。页面会自动连接。');
+  if(startupTimer)clearTimeout(startupTimer);
+  startupTimer=setTimeout(()=>{
+    if(epoch!==serviceEpoch||backendConnected||serviceStopRequested)return;
+    let downloaded=false;try{downloaded=!!localStorage.getItem('shiye-helper-downloaded');}catch{}
+    if(autoDownload&&!downloaded)downloadHelper();
+    $('helperGuideStatus').textContent='尚未连接。首次使用请下载安装包；已安装可点击下方“启动助手”。';
+  },5000);
+}
+$('connectBackend').onclick=async()=>{
+  $('connectBackend').disabled=true;serviceStopRequested=false;serviceHasProbed=true;const epoch=++serviceEpoch;
+  try{const result=await probeService();await attachService(result,epoch);}
+  catch(e){if(epoch!==serviceEpoch)return;backendConnected=false;waitForHelper(true);try{location.href='shiye://start';}catch{}}
+  finally{$('connectBackend').disabled=false;}
 };
+$('launchInstalled').onclick=()=>{serviceStopRequested=false;++serviceEpoch;waitForHelper(false);};
+$('downloadHelper').onclick=()=>{serviceStopRequested=false;serviceHasProbed=true;showHelperGuide('下载后按步骤打开助手，本页面会自动连接。');return downloadHelper();};
+$('disconnectBackend').onclick=async()=>{
+  if(!serviceInstance?.instanceId)return;
+  const instanceId=serviceInstance.instanceId;++serviceEpoch;serviceStopRequested=true;startupActive=false;
+  if(startupTimer)clearTimeout(startupTimer);$('disconnectBackend').disabled=true;serviceUi(false,'正在停止');
+  try{
+    const r=await fetch(backendBase+'/api/service/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instanceId})});
+    const result=await r.json();if(!r.ok)throw new Error(result.error||'停止失败');
+    backendConnected=false;sourceRevision++;localRevision++;
+    if(['queued','running','paused'].includes(currentJobStatus)) {currentJobStatus='interrupted';const badge=document.querySelector('.job .status');if(badge)badge.textContent='已中断';}
+    localPdfWorking=false;localLocks();
+    notice('正在保存下载进度并停止本机服务…');
+  }catch(e){serviceStopRequested=false;notice(e.message,true);serviceUi(backendConnected);}
+};
+async function refreshServiceStatus() {
+  if(!serviceHasProbed||serviceProbeBusy||Date.now()-lastServiceProbe<3000)return;
+  serviceProbeBusy=true;lastServiceProbe=Date.now();const epoch=serviceEpoch;
+  try{const result=await probeService();if(epoch!==serviceEpoch)return;
+    if(serviceStopRequested){serviceUi(false,'正在停止');return;}
+    await attachService(result,epoch);
+  }catch(e){if(epoch!==serviceEpoch)return;backendConnected=false;
+    if(serviceStopRequested){serviceUi(false,'已停止');$('helperGuide').classList.add('hidden');notice('本机服务已停止。再次使用时点击“启动并连接”。');}
+    else serviceUi(false,startupActive?'等待助手启动':'未连接');
+  }finally{serviceProbeBusy=false;}
+}
+serviceUi(backendConnected);
 let chapters = [], busy = false, parsedUrl = '', rulesUrl = '';
 let currentJobId = sessionStorage.getItem('currentDownloadId');
 let currentJobStatus = '', sourceRevision = 0, rulesRequest = 0, previewRevision = 0;
@@ -213,7 +282,7 @@ $('jobs').onclick = async e => {
   b.disabled = true; try { const r = await api(`/api/jobs/${b.dataset.id}/${b.dataset.action}`,{}); if(b.dataset.action === 'open') notice('保存位置：' + r.path); await refresh(); } catch(e) { notice(e.message,true); } finally { b.disabled = false; }
 };
 if (!hosted) loadDownloadDefaults().catch(() => notice('请重启最新版的本机程序，以启用系统下载目录和目录选择功能。', true));
-refresh(); setInterval(() => { refresh(); refreshLocalPdf(); }, 1800);
+refresh(); setInterval(() => { refresh(); refreshLocalPdf(); refreshServiceStatus(); }, 1800);
 
 $('demo').onclick = () => { $('url').value = backendBase + '/demo/'; sourceChanged(); rulesUrl = ''; $('mode').value = 'auto'; $('parse').click(); };
 

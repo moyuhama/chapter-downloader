@@ -1,0 +1,34 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
+const run=promisify(execFile);
+if(process.platform!=='darwin')throw new Error('Mac 启动工具必须在 macOS 上构建');
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const pkg=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));
+const output=path.join(root,'.artifacts','releases');await fs.mkdir(output,{recursive:true});
+const staging=await fs.mkdtemp(path.join(output,'build-'));
+const bundle=path.join(staging,'拾页助手.app');
+const contents=path.join(bundle,'Contents'),resources=path.join(contents,'Resources'),app=path.join(resources,'app');
+await fs.mkdir(path.join(contents,'MacOS'),{recursive:true});await fs.mkdir(app,{recursive:true});
+const files=['server.js','crawler.js','jobs.js','directories.js','access.js','service-state.js','pdf.js','pdf-queue.js','local-pdf.js','package.json','package-lock.json','public','launcher/cli.mjs'];
+for(const file of files){await fs.mkdir(path.dirname(path.join(app,file)),{recursive:true});await fs.cp(path.join(root,file),path.join(app,file),{recursive:true,verbatimSymlinks:true});}
+await fs.cp(path.join(root,'node_modules'),path.join(app,'node_modules'),{recursive:true,verbatimSymlinks:true});
+await fs.copyFile(process.execPath,path.join(resources,'node'));await fs.chmod(path.join(resources,'node'),0o755);
+let browser=path.dirname(createRequire(path.join(root,'package.json'))('playwright').chromium.executablePath());
+while(!/^chromium-\d+$/.test(path.basename(browser))){const parent=path.dirname(browser);if(parent===browser)throw new Error('找不到 Chromium 安装目录，请先运行 npm run setup');browser=parent;}
+await fs.cp(browser,path.join(app,'browsers',path.basename(browser)),{recursive:true,verbatimSymlinks:true});
+const executable=path.join(contents,'MacOS','ShiyeHelper');
+await run('swiftc',['-O','-target',`${process.arch==='arm64'?'arm64':'x86_64'}-apple-macosx14.0`,path.join(root,'launcher/mac.swift'),'-o',executable],{maxBuffer:4*1024*1024});
+const version=pkg.version.match(/^\d+\.\d+\.\d+/)[0];
+await fs.writeFile(path.join(contents,'Info.plist'),`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.moyuhama.shiye.helper</string><key>CFBundleExecutable</key><string>ShiyeHelper</string><key>CFBundleName</key><string>拾页助手</string><key>CFBundleDisplayName</key><string>拾页助手</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>${version}</string><key>CFBundleShortVersionString</key><string>${version}</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>LSUIElement</key><true/><key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>com.moyuhama.shiye</string><key>CFBundleURLSchemes</key><array><string>shiye</string></array></dict></array></dict></plist>`);
+await run('codesign',['--force','--sign','-',bundle],{maxBuffer:4*1024*1024});
+const check=await run(executable,['--check']);if(!JSON.parse(check.stdout).node)throw new Error('启动器运行环境检查失败');
+const zip=path.join(output,`shiye-macos-${process.arch}.zip`);await fs.rm(zip,{force:true});
+await run('ditto',['-c','-k','--sequesterRsrc','--keepParent',bundle,zip],{maxBuffer:4*1024*1024});
+const sum=createHash('sha256').update(await fs.readFile(zip)).digest('hex');await fs.writeFile(zip+'.sha256',`${sum}  ${path.basename(zip)}\n`);
+const result={bundle,zip,arch:process.arch,version:pkg.version,signature:'ad-hoc, not notarized',check:JSON.parse(check.stdout)};
+await fs.writeFile(path.join(output,'build-result.json'),JSON.stringify(result));console.log(JSON.stringify(result));

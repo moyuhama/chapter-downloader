@@ -1,0 +1,98 @@
+name: Build Mac Helper
+on:
+  push:
+    tags: ['v1.*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.1'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium --no-shell
+      - name: Test
+        shell: bash
+        run: |
+          export SHIYE_BROWSER_EXECUTABLE="$(node -p 'require("playwright").chromium.executablePath()')"
+          npm test
+      - run: npm run package:mac
+      - name: Verify packaged application
+        shell: bash
+        run: |
+          bundle=$(node -p 'require("./.artifacts/releases/build-result.json").bundle')
+          node scripts/verify-mac.mjs "$bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: .artifacts/releases/shiye-macos-${{ matrix.arch }}.zip
+          retention-days: 1
+  merge:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.1'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mac-*
+          path: .artifacts/architecture-builds
+          merge-multiple: true
+      - run: node scripts/merge-mac.mjs
+      - name: Verify universal application
+        shell: bash
+        run: |
+          bundle=$(node -p 'require("./.artifacts/releases/merge-result.json").bundle')
+          node scripts/verify-mac.mjs "$bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal
+          path: |
+            .artifacts/releases/shiye-macos-universal.zip
+            .artifacts/releases/shiye-macos-universal.zip.sha256
+          retention-days: 1
+  verify-intel:
+    needs: merge
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.1'
+      - uses: actions/download-artifact@v4
+        with:
+          name: universal
+          path: .artifacts/release
+      - run: ditto -x -k .artifacts/release/shiye-macos-universal.zip .artifacts/verify
+      - run: node scripts/verify-mac.mjs '.artifacts/verify/拾页助手.app'
+  publish:
+    needs: [merge, verify-intel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: universal
+          path: release
+      - name: Publish preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="v$(node -p 'require("./package.json").version')"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --verify-tag --prerelease --title '拾页 Mac 助手预览版' --notes-file launcher/RELEASE.md
+          gh release upload "$tag" release/* --clobber

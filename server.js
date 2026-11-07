@@ -1,6 +1,8 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { helperHome } from './service-state.js';
 import { fileURLToPath } from 'node:url';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -12,15 +14,19 @@ import { LocalPdf, scanImageDirectory } from './local-pdf.js';
 import { allowRequest } from './access.js';
 import { defaultDownloadDirectory, chooseDirectory } from './directories.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
-const crawler = new Crawler(path.join(root, 'data'));
+const version = JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8')).version;
+const runtimeRoot = process.env.SHIYE_HOME ? helperHome() : root;
+const instanceId = randomUUID();
+let stopping = false;
+const crawler = new Crawler(path.join(runtimeRoot, 'data'));
 const pdfQueue = new PdfQueue();
 const converter = new LocalPdf({ pdfQueue });
-const jobs = new Jobs(root, crawler, { pdfQueue }); await jobs.init();
+const jobs = new Jobs(runtimeRoot, crawler, { pdfQueue }); await jobs.init();
 let browserBusy = false;
 async function exclusive(fn) { if (browserBusy || jobs.running.size || [...jobs.jobs.values()].some(j => ['queued', 'running', 'paused'].includes(j.status))) throw new Error('浏览器正在处理其他操作，请完成或停止后再试'); browserBusy = true; try { return await fn(); } finally { browserBusy = false; } }
 const json = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 async function body(req) { let data = ''; for await (const chunk of req) { data += chunk; if (data.length > 2e6) throw new Error('请求过大'); } return data ? JSON.parse(data) : {}; }
-async function rules() { try { return JSON.parse(await fs.readFile(path.join(root, 'data/rules.json'), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }
+async function rules() { try { return JSON.parse(await fs.readFile(path.join(runtimeRoot, 'data/rules.json'), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; } }
 async function servePdf(res, file) {
   const stat = await fs.stat(file);
   const filename = encodeURIComponent(path.basename(file)).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
@@ -32,7 +38,7 @@ const server = http.createServer(async (req, res) => {
     if (!allowRequest(req, res)) return json(res, 403, { error: '仅允许本机界面或已配置的 GitHub Pages 页面访问' });
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
-    if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader' });
+    if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader', version, instanceId, state: stopping ? 'stopping' : 'ready', capabilities: { shutdown: true } });
     if (req.method === 'GET' && p === '/api/download-settings') return json(res, 200, { directory: defaultDownloadDirectory, separator: path.sep });
     const conversion = p.match(/^\/api\/conversions\/([^/]+)(?:\/(pdf|stop|open))?$/);
     if (req.method === 'GET' && conversion) {
@@ -55,6 +61,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/rules') return json(res, 200, (await rules())[new URL(httpUrl(url.searchParams.get('url'))).hostname] || {});
     if (req.method === 'POST' && p.startsWith('/api/')) {
       const b = await body(req);
+      if (p === '/api/service/stop') {
+        if (b.instanceId !== instanceId) return json(res,409,{error:'服务实例已变化，请重新连接后再停止'});
+        json(res,200,{ok:true,state:'stopping'});setTimeout(()=>shutdown(),25);return;
+      }
+      if (stopping) return json(res,503,{error:'服务正在停止'});
       if (p === '/api/local-images') return json(res,200,await scanImageDirectory(b.source));
       if (p === '/api/conversions') return json(res,200,await converter.create(b));
       if (conversion) {
@@ -74,7 +85,7 @@ const server = http.createServer(async (req, res) => {
       }));
       if (p === '/api/pick') return json(res, 200, await exclusive(() => crawler.pick(httpUrl(b.url), b.kind === 'chapter' ? 'chapter' : 'image')));
       if (p === '/api/login') return json(res, 200, await exclusive(async () => { const page = await crawler.page(httpUrl(b.url)); await page.bringToFront(); return { message: '已打开浏览器，请手动登录。登录完成后回到此处重新解析。' }; }));
-      if (p === '/api/rules') { const all = await rules(); all[new URL(httpUrl(b.url)).hostname] = b.options; await fs.writeFile(path.join(root, 'data/rules.json'), JSON.stringify(all, null, 2)); return json(res, 200, { ok: true }); }
+      if (p === '/api/rules') { const all = await rules(); all[new URL(httpUrl(b.url)).hostname] = b.options; await fs.writeFile(path.join(runtimeRoot, 'data/rules.json'), JSON.stringify(all, null, 2)); return json(res, 200, { ok: true }); }
       if (p === '/api/jobs') { if (browserBusy) throw new Error('浏览器操作尚未结束'); return json(res, 200, await jobs.create(b)); }
       const m = p.match(/^\/api\/jobs\/([^/]+)\/(pause|resume|stop|open|retry-pdf)$/);
       if (m) {
@@ -104,7 +115,7 @@ const server = http.createServer(async (req, res) => {
       const n = Number(demoImage[1]) * 3 + Number(demoImage[2]);
       return res.end(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1100" viewBox="0 0 800 1100"><rect width="800" height="1100" fill="#e8efdf"/><circle cx="600" cy="230" r="80" fill="#cedb98"/><path d="M0 850L280 ${300+n*12}L650 850Z" fill="#a9bd91"/><path d="M170 950L570 ${480+n*8}L900 950Z" fill="#52765c"/><text x="65" y="105" font-size="25" fill="#52765c" font-family="sans-serif">PAGE COLLECTOR / CHAPTER ${demoImage[1]}</text><text x="65" y="1030" font-size="40" fill="#52765c" font-family="monospace">PAGE 00${demoImage[2]}</text></svg>`);
     }
-    const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/style.css': ['style.css', 'text/css'], '/app.js': ['app.js', 'text/javascript'] };
+    const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/style.css': ['style.css', 'text/css'], '/app.js': ['app.js', 'text/javascript'], '/helper-release.json': ['helper-release.json','application/json'] };
     if (!assets[p]) return json(res, 404, { error: '页面不存在' });
     const [file, mime] = assets[p]; res.writeHead(200, { 'Content-Type': mime, 'X-Content-Type-Options': 'nosniff' }); res.end(await fs.readFile(path.join(root, 'public', file)));
   } catch (e) { json(res, 400, { error: e.message }); }
@@ -112,4 +123,21 @@ const server = http.createServer(async (req, res) => {
 const port = Number(process.env.PORT || 3789);
 server.listen(port, '127.0.0.1', () => console.log(`章节采集器：http://127.0.0.1:${port}`));
 server.on('error', e => { console.error(e.message); process.exit(1); });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { for (const j of jobs.jobs.values()) if (['running','paused','queued'].includes(j.status)) j.status = 'interrupted'; await jobs.persist(); await crawler.close(); server.close(); process.exit(0); });
+async function shutdown() {
+  if(stopping)return;stopping=true;
+  const active=[...jobs.jobs.values()].filter(j=>['running','paused','queued'].includes(j.status));
+  for(const j of active)j.status='stopped';
+  if(converter.busy&&converter.current)converter.stop(converter.current.id);
+  const deadline=setTimeout(()=>process.exit(1),35000);deadline.unref();
+  try {
+    await crawler.close();
+    const end=Date.now()+30000;
+    while((jobs.running.size||converter.busy||browserBusy)&&Date.now()<end)await new Promise(r=>setTimeout(r,100));
+    for(const j of active)j.status='interrupted';
+    await jobs.persist();
+  } finally {
+    server.close(()=>process.exit(0));server.closeIdleConnections();
+    setTimeout(()=>{server.closeAllConnections();process.exit(0);},1000).unref();
+  }
+}
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>shutdown());

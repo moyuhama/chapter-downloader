@@ -7,7 +7,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return { promise, resolve, reject }; }
 function element() {
   const classes = new Set(['hidden']);
-  return { value:'', checked:false, indeterminate:false, innerHTML:'', textContent:'', disabled:false, dataset:{}, listeners:{},
+  return { value:'', checked:false, indeterminate:false, innerHTML:'', textContent:'', disabled:false, dataset:{}, listeners:{}, remove(){},
     classList:{add:c=>classes.add(c),remove:c=>classes.delete(c),contains:c=>classes.has(c),toggle(c,on){ if(on??!classes.has(c))classes.add(c);else classes.delete(c); }},
     setAttribute(name,value){this[name]=value;},
     addEventListener(name,fn){ (this.listeners[name]??=[]).push(fn); },
@@ -17,17 +17,19 @@ function element() {
 async function app({ route = () => undefined, jobs = [], storedId } = {}) {
   const nodes=new Map(); const $=id=>{ if(!nodes.has(id))nodes.set(id,element());return nodes.get(id); };
   for(const id of ['minWidth','minHeight']) $(id).value='200'; $('generatePdf').checked=true;$('splitLongImages').checked=true;$('followPages').checked=true; $('mode').value='auto';
-  const storage=new Map(storedId ? [['currentDownloadId',storedId]] : []); let interval;
+  const storage=new Map(storedId ? [['currentDownloadId',storedId]] : []); let interval; let clock=Date.now();const timers=[],downloads=[];const localStore=new Map();
   vm.runInNewContext(script, {
-    document:{getElementById:$,querySelector:()=>element(),querySelectorAll:()=>[],activeElement:null},
+    document:{getElementById:$,querySelector:()=>element(),querySelectorAll:()=>[],activeElement:null,createElement:()=>element(),body:{append:e=>downloads.push(e)}},
     location:{hostname:'127.0.0.1',origin:'http://127.0.0.1:3789'},
     sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
-    setInterval:fn=>{interval=fn;}, AbortSignal,
+    setInterval:fn=>{interval=fn;}, setTimeout:(fn,ms)=>{const timer={fn,ms,cancelled:false};timers.push(timer);return timer;},clearTimeout:t=>{if(t)t.cancelled=true;},AbortSignal,URL,Date:class extends Date{static now(){return clock;}},navigator:{platform:'MacIntel',userAgent:'Macintosh'},localStorage:{getItem:k=>localStore.get(k)||null,setItem:(k,v)=>localStore.set(k,v)},
     fetch:async(url,init)=>{
-      const p=new URL(url).pathname; const input=init?.body?JSON.parse(init.body):undefined;
+      const p=new URL(url,'http://127.0.0.1:3789').pathname; const input=init?.body?JSON.parse(init.body):undefined;
       let result=await route(p,input,url);
       if(result===undefined) {
-        if(p==='/api/download-settings') result={directory:'/user/Downloads',separator:'/'};
+        if(p==='/api/health') result={ok:true,app:'chapter-downloader',instanceId:'test-instance',state:'ready',capabilities:{shutdown:true}};
+        else if(p==='/helper-release.json') result={ready:true,version:'test',macUniversal:'https://github.com/moyuhama/chapter-downloader/releases/download/test/shiye-macos-universal.zip'};
+        else if(p==='/api/download-settings') result={directory:'/user/Downloads',separator:'/'};
         else if(p==='/api/jobs') result=jobs;
         else if(p==='/api/rules') result={};
         else if(p==='/api/parse') result={title:input.url,confidence:'auto',chapters:[{title:input.url+' chapter',url:input.url+'/chapter'}]};
@@ -38,7 +40,7 @@ async function app({ route = () => undefined, jobs = [], storedId } = {}) {
     }
   });
   await tick();
-  return {$,storage,poll:async()=>{interval();await tick();},url(value){$('url').value=value;$('url').emit('input');}};
+  return {$,storage,downloads,runTimers:async()=>{for(const t of timers.splice(0))if(!t.cancelled)t.fn();await tick();},poll:async()=>{clock+=4000;interval();await tick();},url(value){$('url').value=value;$('url').emit('input');}};
 }
 async function parseFirst(a) { a.url('https://first.example/book'); await a.$('parse').click(); await a.$('preview').click(); assert.match(a.$('previewResult').innerHTML,/first\.example/); }
 
@@ -171,4 +173,17 @@ test('local PDF tool works without parsing a URL, preserves chosen order and cle
 test('local folder scan failures are shown and do not leave a stale image list',async()=>{
   const a=await app({route:p=>{if(p==='/api/local-images')throw new Error('没有支持的图片');}});
   a.$('localPdfSource').value='/empty';await a.$('localPdfScan').click();assert.match(a.$('localPdfNotice').textContent,/没有支持/);assert.equal(a.$('localPdfSettings').classList.contains('hidden'),true);
+});
+test('startup shows installation guidance, triggers first-time download and automatically connects when service appears',async()=>{
+  let online=false;
+  const a=await app({route:p=>{if(p==='/api/health'&&!online)throw new Error('offline');}});
+  await a.$('connectBackend').click();assert.equal(a.$('helperGuide').classList.contains('hidden'),false);
+  await a.runTimers();assert.equal(a.downloads.length,1);assert.match(a.downloads[0].href,/shiye-macos-universal\.zip$/);assert.match(a.$('helperDownloadState').textContent,/已发起下载/);
+  online=true;await a.poll();assert.equal(a.$('backendState').textContent,'已连接');assert.equal(a.$('helperGuide').classList.contains('hidden'),true);assert.equal(a.$('disconnectBackend').disabled,false);
+});
+test('disconnect uses the connected instance and does not restart or redownload after stop',async()=>{
+  let online=true,payload;
+  const a=await app({route:(p,b)=>{if(p==='/api/health'&&!online)throw new Error('offline');if(p==='/api/service/stop'){payload=b;online=false;return {ok:true,state:'stopping'};}}});
+  await a.$('connectBackend').click();await a.$('disconnectBackend').click();await a.poll();await a.runTimers();
+  assert.equal(payload.instanceId,'test-instance');assert.equal(a.$('backendState').textContent,'已停止');assert.equal(a.downloads.length,0);
 });
