@@ -22,7 +22,7 @@ async function attachService(result, epoch) {
   const wasWaiting = startupActive || !backendConnected;
   serviceInstance = result; backendConnected = true; startupActive = false;
   if (startupTimer) clearTimeout(startupTimer);
-  $('helperGuide').classList.add('hidden'); serviceUi(true);
+  if(wasWaiting)$('helperGuide').classList.add('hidden'); serviceUi(true);
   if (wasWaiting) { await loadDownloadDefaults(); notice('本机助手已连接，可以使用。'); await refresh(); }
 }
 function showHelperGuide(message) {
@@ -33,7 +33,7 @@ async function downloadHelper() {
   if (!macSupported()) { $('helperDownloadState').textContent='当前安装包支持 Mac；其他系统请使用源码方式启动。'; return; }
   $('downloadHelper').disabled=true;
   try {
-    const response=await fetch('./helper-release.json',{cache:'no-store'}); const manifest=await response.json();
+    const response=await fetch(hosted ? './helper-release.json' : 'https://moyuhama.github.io/chapter-downloader/helper-release.json',{cache:'no-store'}); const manifest=await response.json();
     if(!response.ok||!manifest.ready)throw new Error('安装包正在准备，请稍后重试。');
     const url=new URL(manifest.macUniversal);
     if(url.origin!=='https://github.com'||!url.pathname.startsWith('/moyuhama/chapter-downloader/releases/download/'))throw new Error('安装包地址无效');
@@ -54,17 +54,21 @@ function waitForHelper(autoDownload) {
   },5000);
 }
 $('connectBackend').onclick=async()=>{
-  $('connectBackend').disabled=true;serviceStopRequested=false;serviceHasProbed=true;const epoch=++serviceEpoch;
+  $('connectBackend').disabled=true;serviceStopRequested=false;serviceHasProbed=true;startupActive=true;const epoch=++serviceEpoch;
   try{const result=await probeService();await attachService(result,epoch);}
   catch(e){if(epoch!==serviceEpoch)return;backendConnected=false;waitForHelper(true);try{location.href='shiye://start';}catch{}}
   finally{$('connectBackend').disabled=false;}
 };
 $('launchInstalled').onclick=()=>{serviceStopRequested=false;++serviceEpoch;waitForHelper(false);};
+$('showHelperGuide').onclick=()=>{
+  if(!backendConnected){serviceStopRequested=false;serviceHasProbed=true;startupActive=true;++serviceEpoch;serviceUi(false,'等待助手启动');}
+  showHelperGuide('按下方步骤完成首次设置。工具启动后，本页面会自动连接。');
+};
 $('downloadHelper').onclick=()=>{serviceStopRequested=false;serviceHasProbed=true;showHelperGuide('下载后按步骤打开助手，本页面会自动连接。');return downloadHelper();};
 $('disconnectBackend').onclick=async()=>{
   if(!serviceInstance?.instanceId)return;
   const instanceId=serviceInstance.instanceId;++serviceEpoch;serviceStopRequested=true;startupActive=false;
-  if(startupTimer)clearTimeout(startupTimer);$('disconnectBackend').disabled=true;serviceUi(false,'正在停止');
+  if(startupTimer)clearTimeout(startupTimer);$('helperGuide').classList.add('hidden');$('disconnectBackend').disabled=true;serviceUi(false,'正在停止');
   try{
     const r=await fetch(backendBase+'/api/service/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instanceId})});
     const result=await r.json();if(!r.ok)throw new Error(result.error||'停止失败');
@@ -81,7 +85,7 @@ async function refreshServiceStatus() {
     if(serviceStopRequested){serviceUi(false,'正在停止');return;}
     await attachService(result,epoch);
   }catch(e){if(epoch!==serviceEpoch)return;backendConnected=false;
-    if(serviceStopRequested){serviceUi(false,'已停止');$('helperGuide').classList.add('hidden');notice('本机服务已停止。再次使用时点击“启动并连接”。');}
+    if(serviceStopRequested){serviceUi(false,'已停止');notice('本机服务已停止。再次使用时点击“启动并连接”。');}
     else serviceUi(false,startupActive?'等待助手启动':'未连接');
   }finally{serviceProbeBusy=false;}
 }
@@ -156,7 +160,7 @@ function sourceChanged() {
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const labels = { queued:'等待中', running:'下载中', paused:'已暂停', completed:'已完成', partial:'有失败项', stopped:'已停止', interrupted:'上次已中断', failed:'失败', pending:'待处理' };
 function notice(message, error = false) { $('notice').textContent = message; $('notice').classList.toggle('error', error); }
-async function api(url, data) { if (!backendConnected) throw new Error('请先点击上方“连接本机服务”'); const r = await fetch(backendBase + url, data === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }); const result = await r.json(); if (!r.ok) throw new Error(result.error || '请求失败'); return result; }
+async function api(url, data) { if (!backendConnected) throw new Error('请先点击上方“启动并连接”'); const r = await fetch(backendBase + url, data === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }); const result = await r.json(); if (!r.ok) throw new Error(result.error || '请求失败'); return result; }
 function options() { return { mode:$('mode').value, chapterSelector:$('chapterSelector').value.trim(), imageSelector:$('imageSelector').value.trim(), nextSelector:$('nextSelector').value.trim(), minWidth:Number($('minWidth').value), minHeight:Number($('minHeight').value), followPages:$('followPages').checked }; }
 async function task(fn) {
   if (busy) return; busy = true;

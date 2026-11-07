@@ -28,7 +28,7 @@ async function app({ route = () => undefined, jobs = [], storedId } = {}) {
       let result=await route(p,input,url);
       if(result===undefined) {
         if(p==='/api/health') result={ok:true,app:'chapter-downloader',instanceId:'test-instance',state:'ready',capabilities:{shutdown:true}};
-        else if(p==='/helper-release.json') result={ready:true,version:'test',macUniversal:'https://github.com/moyuhama/chapter-downloader/releases/download/test/shiye-macos-universal.zip'};
+        else if(p==='/helper-release.json'||p==='/chapter-downloader/helper-release.json') result={ready:true,version:'test',macUniversal:'https://github.com/moyuhama/chapter-downloader/releases/download/test/shiye-macos-universal.zip'};
         else if(p==='/api/download-settings') result={directory:'/user/Downloads',separator:'/'};
         else if(p==='/api/jobs') result=jobs;
         else if(p==='/api/rules') result={};
@@ -186,4 +186,8 @@ test('disconnect uses the connected instance and does not restart or redownload 
   const a=await app({route:(p,b)=>{if(p==='/api/health'&&!online)throw new Error('offline');if(p==='/api/service/stop'){payload=b;online=false;return {ok:true,state:'stopping'};}}});
   await a.$('connectBackend').click();await a.$('disconnectBackend').click();await a.poll();await a.runTimers();
   assert.equal(payload.instanceId,'test-instance');assert.equal(a.$('backendState').textContent,'已停止');assert.equal(a.downloads.length,0);
+});
+test('manually opened install instructions remain visible while an existing service is connected',async()=>{
+  const a=await app();await a.$('connectBackend').click();a.$('showHelperGuide').click();await a.poll();
+  assert.equal(a.$('helperGuide').classList.contains('hidden'),false);assert.equal(a.$('backendState').textContent,'已连接');
 });
