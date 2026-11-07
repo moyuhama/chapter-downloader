@@ -127,6 +127,7 @@ async function init(){
   try{
     if(!shared){const health=await api('/api/health');if(!health.capabilities?.reader)throw new Error('阅读器需要新版本机助手。请返回首页下载最新版，解压并双击打开后再回来。');}
     const job=fragment.get('job');const value=job&&!shared?await api('/api/reader/open',{jobId:job}):await api('/api/reader/book');
+    if(job&&!shared)history.replaceState(null,'',location.pathname);
     if(value)await useBook(value);else if(shared)notice('电脑尚未打开作品，请先在电脑选择作品文件夹。',true);
   }catch(e){notice(e.message,true);if(!shared)$('updateHelper').classList.remove('hidden');}
 }
