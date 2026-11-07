@@ -1,0 +1,9 @@
+node_modules/
+downloads/
+data/
+.DS_Store
+
+.artifacts/
+.env
+.env.*
+*.log
