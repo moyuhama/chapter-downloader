@@ -1,6 +1,10 @@
 {
-  "version": "v1.1.0-preview.1",
+  "version": "v1.2.0-preview.3",
   "ready": true,
-  "macUniversal": "https://github.com/moyuhama/chapter-downloader/releases/download/v1.1.0-preview.1/shiye-macos-universal.zip",
-  "sizeBytes": 496506979
+  "macUniversal": "https://github.com/moyuhama/chapter-downloader/releases/download/v1.2.0-preview.3/shiye-macos-universal.zip",
+  "sizeBytes": 497712576,
+  "features": [
+    "reader",
+    "lan-reader"
+  ]
 }
