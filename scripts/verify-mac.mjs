@@ -30,9 +30,16 @@ try {
   const page=await fetch(`http://127.0.0.1:${port}/reader.html`);assert.equal(page.status,200);
   const image=await fetch(`http://127.0.0.1:${port}/api/reader/image/0/0?book=${opened.id}`);assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');
   await image.arrayBuffer();
+  assert.equal(started.capabilities.folderRename,true);
+  const renameParent=path.join(home,'rename');await fs.mkdir(renameParent);await fs.mkdir(path.join(renameParent,'001_第85話-标题'));
+  await fs.writeFile(path.join(renameParent,'001_第85話-标题','keep.txt'),'preserved');
+  const plan=await (await fetch(`http://127.0.0.1:${port}/api/rename/preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:renameParent})})).json();
+  assert.equal(plan.rows[0].to,'85');
+  const renamed=await (await fetch(`http://127.0.0.1:${port}/api/rename/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:plan.id,changes:[{id:plan.rows[0].id,to:'85'}]})})).json();
+  assert.equal(renamed.ok,true);assert.equal(await fs.readFile(path.join(renameParent,'85','keep.txt'),'utf8'),'preserved');
   process.env.PLAYWRIGHT_BROWSERS_PATH=path.join(app,'browsers');
   const {chromium}=createRequire(path.join(app,'package.json'))('playwright');await fs.access(chromium.executablePath());
   const browser=await chromium.launch({headless:true,executablePath:chromium.executablePath()});await browser.close();
   await run(node,[cli,'stop'],{env,timeout:10000});
-  console.log(JSON.stringify({arch:process.arch,check,service:'start/stop passed',pdf:'passed',reader:'passed',bundledBrowser:'passed',protocolValidation:'passed'}));
+  console.log(JSON.stringify({arch:process.arch,check,service:'start/stop passed',pdf:'passed',reader:'passed',folderRename:'passed',bundledBrowser:'passed',protocolValidation:'passed'}));
 }finally{await run(node,[cli,'stop'],{env,timeout:10000}).catch(()=>{});await fs.rm(home,{recursive:true,force:true});}

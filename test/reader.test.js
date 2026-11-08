@@ -51,7 +51,7 @@ test('LAN reader requires a revocable token and exact host/origin, exposes no co
   assert.equal((await request(url,{token,origin:'https://attacker.example',route:'/api/reader/book'})).status,403);
   assert.equal((await request(url,{token,host:'attacker.example',route:'/api/reader/book'})).status,403);
   const summary=await request(url,{token,route:'/api/reader/book'});assert.equal(summary.json().id,book.id);
-  for(const route of ['/api/reader/source','/api/reader/share','/api/jobs','/api/health','/api/service/stop','/server.js','/../server.js'])assert.equal((await request(url,{token,route})).status,404);
+  for(const route of ['/api/reader/source','/api/reader/share','/api/jobs','/api/rename/preview','/api/rename/apply','/api/health','/api/service/stop','/server.js','/../server.js'])assert.equal((await request(url,{token,route})).status,404);
   assert.equal((await request(url,{token,method:'POST',route:'/api/reader/open'})).status,405);
   const image=await request(url,{route:`/api/reader/image/0/0?book=${book.id}&token=${token}`});assert.equal(image.status,200);assert.equal(image.headers['content-type'],'image/png');
   assert.equal((await request(url,{token,route:`/api/reader/image/0/99?book=${book.id}`})).status,400);

@@ -13,6 +13,7 @@ import { PdfQueue } from './pdf-queue.js';
 import { LocalPdf, scanImageDirectory } from './local-pdf.js';
 import { allowRequest } from './access.js';
 import { Reader } from './reader.js';
+import { FolderRenamer, renamedPath } from './folder-rename.js';
 import { defaultDownloadDirectory, chooseDirectory } from './directories.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const version = JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8')).version;
@@ -24,6 +25,10 @@ const pdfQueue = new PdfQueue();
 const converter = new LocalPdf({ pdfQueue });
 const jobs = new Jobs(runtimeRoot, crawler, { pdfQueue }); await jobs.init();
 const reader = new Reader({stateDirectory:path.join(runtimeRoot,'data'),publicDirectory:path.join(root,'public')}); await reader.init();
+const renamer = new FolderRenamer();
+let renameBusy = false;
+const canonical=async value=>value?await fs.realpath(value).catch(()=>path.resolve(value)):value;
+const overlaps=(a,b)=>{if(!a||!b)return false;const inside=(p,q)=>{const r=path.relative(p,q);return !r||(!r.startsWith('..'+path.sep)&&r!=='..'&&!path.isAbsolute(r));};return inside(a,b)||inside(b,a);};
 let readerBusy = false;
 let browserBusy = false;
 async function exclusive(fn) { if (browserBusy || jobs.running.size || [...jobs.jobs.values()].some(j => ['queued', 'running', 'paused'].includes(j.status))) throw new Error('浏览器正在处理其他操作，请完成或停止后再试'); browserBusy = true; try { return await fn(); } finally { browserBusy = false; } }
@@ -41,7 +46,7 @@ const server = http.createServer(async (req, res) => {
     if (!allowRequest(req, res)) return json(res, 403, { error: '仅允许本机界面或已配置的 GitHub Pages 页面访问' });
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
-    if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader', version, instanceId, state: stopping ? 'stopping' : 'ready', capabilities: { shutdown: true, reader: true } });
+    if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true, app: 'chapter-downloader', version, instanceId, state: stopping ? 'stopping' : 'ready', capabilities: { shutdown: true, reader: true, folderRename: true } });
     if (req.method === 'GET' && p === '/api/reader/source') return json(res,200,{source:reader.book?.directory||''});
     if (req.method === 'GET' && p === '/api/reader/share') return json(res,200,reader.shareStatus());
     if (req.method === 'GET' && p.startsWith('/api/reader/')) return await reader.read(req,res,url);
@@ -72,6 +77,37 @@ const server = http.createServer(async (req, res) => {
         json(res,200,{ok:true,state:'stopping'});setTimeout(()=>shutdown(),25);return;
       }
       if (stopping) return json(res,503,{error:'服务正在停止'});
+      if (p === '/api/rename/preview' || p === '/api/rename/apply') {
+        if(renameBusy)throw new Error('正在处理文件夹改名，请稍候');renameBusy=true;
+        try {
+          if(p === '/api/rename/preview')return json(res,200,await renamer.preview(b.source));
+          const directory=renamer.plan?.directory;
+          if(readerBusy)throw new Error('阅读器正在切换作品，请稍后重试');
+          const jobPaths=await Promise.all([...jobs.jobs.values()].map(async job=>({job,output:await canonical(job.output)})));
+          const conversionPaths=converter.current?Object.fromEntries(await Promise.all(['source','directory','output'].map(async key=>[key,await canonical(converter.current[key])]))):{};
+          if(jobs.creating||converter.creating||jobPaths.some(({job,output})=>(jobs.running.has(job.id)||['queued','running','paused'].includes(job.status))&&overlaps(directory,output)) || (converter.busy&&(overlaps(directory,conversionPaths.source)||overlaps(directory,conversionPaths.directory))))throw new Error('此目录正在下载或转换，请完成或停止任务后再改名');
+          const previous=reader.book?.directory;
+          const result=await renamer.apply(b.id,b.changes);
+          if(result.changed) {
+            let updated=false;
+            for(const {job,output:old} of jobPaths) {
+              const next=renamedPath(old,directory,result.rows);
+              for(const chapter of job.chapters){const original=path.join(old,chapter.folder),moved=renamedPath(original,directory,result.rows);if(moved!==original){chapter.folder=path.relative(next,moved);updated=true;}}
+              if(next!==old){job.output=next;job.directory=path.dirname(next);job.folderName=path.basename(next);updated=true;}
+            }
+            if(updated){try{await jobs.persist();}catch(e){result.warning='目录已改名，但下载索引保存失败，请勿继续下载并检查磁盘权限：'+e.message;}}
+            if(converter.current)for(const field of ['source','directory','output']){const moved=renamedPath(conversionPaths[field],directory,result.rows);if(moved!==conversionPaths[field])converter.current[field]=moved;}
+          }
+          if(result.changed&&previous&&overlaps(directory,previous)) {
+            const source=renamedPath(previous,directory,result.rows);
+            try{await reader.open(source);result.warning=(result.warning||'')+'阅读器目录已刷新，手机分享链接已关闭；请重新打开阅读器。';}
+            catch{await reader.stopShare();reader.book=null;result.warning=(result.warning||'')+'请在阅读器中重新选择改名后的作品。';}
+          }
+          return json(res,200,result);
+        } finally {renameBusy=false;}
+      }
+      if(renameBusy&&['/api/jobs','/api/conversions','/api/reader/open','/api/reader/share'].includes(p))throw new Error('正在重命名文件夹，请稍候');
+      if(renameBusy&&/^\/api\/jobs\/[^/]+\/(resume|retry-pdf)$/.test(p))throw new Error('正在重命名文件夹，请稍候');
       if (p === '/api/reader/open' || p === '/api/reader/share') {
         if(readerBusy)throw new Error('阅读器正在处理操作，请稍候');readerBusy=true;
         try {
@@ -132,7 +168,7 @@ const server = http.createServer(async (req, res) => {
       const n = Number(demoImage[1]) * 3 + Number(demoImage[2]);
       return res.end(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1100" viewBox="0 0 800 1100"><rect width="800" height="1100" fill="#e8efdf"/><circle cx="600" cy="230" r="80" fill="#cedb98"/><path d="M0 850L280 ${300+n*12}L650 850Z" fill="#a9bd91"/><path d="M170 950L570 ${480+n*8}L900 950Z" fill="#52765c"/><text x="65" y="105" font-size="25" fill="#52765c" font-family="sans-serif">PAGE COLLECTOR / CHAPTER ${demoImage[1]}</text><text x="65" y="1030" font-size="40" fill="#52765c" font-family="monospace">PAGE 00${demoImage[2]}</text></svg>`);
     }
-    const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/style.css': ['style.css', 'text/css'], '/app.js': ['app.js', 'text/javascript'], '/helper-release.json': ['helper-release.json','application/json'], '/reader.html':['reader.html','text/html; charset=utf-8'], '/reader.js':['reader.js','text/javascript'], '/reader.css':['reader.css','text/css'] };
+    const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/style.css': ['style.css', 'text/css'], '/app.js': ['app.js', 'text/javascript'], '/helper-release.json': ['helper-release.json','application/json'], '/reader.html':['reader.html','text/html; charset=utf-8'], '/reader.js':['reader.js','text/javascript'], '/reader.css':['reader.css','text/css'], '/rename.html':['rename.html','text/html; charset=utf-8'], '/rename.js':['rename.js','text/javascript'] };
     if (!assets[p]) return json(res, 404, { error: '页面不存在' });
     const [file, mime] = assets[p]; res.writeHead(200, { 'Content-Type': mime, 'X-Content-Type-Options': 'nosniff' }); res.end(await fs.readFile(path.join(root, 'public', file)));
   } catch (e) { json(res, 400, { error: e.message }); }
@@ -150,7 +186,7 @@ async function shutdown() {
     await reader.stopShare();
     await crawler.close();
     const end=Date.now()+30000;
-    while((jobs.running.size||converter.busy||browserBusy)&&Date.now()<end)await new Promise(r=>setTimeout(r,100));
+    while((jobs.running.size||converter.busy||browserBusy||renameBusy)&&Date.now()<end)await new Promise(r=>setTimeout(r,100));
     for(const j of active)j.status='interrupted';
     await jobs.persist();
   } finally {
