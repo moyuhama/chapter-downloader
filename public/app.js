@@ -91,9 +91,10 @@ async function refreshServiceStatus() {
 }
 serviceUi(backendConnected);
 let chapters = [], busy = false, parsedUrl = '', rulesUrl = '';
-let currentJobId = sessionStorage.getItem('currentDownloadId');
+// A fresh page has no current download; never restore an unscoped legacy ID.
+sessionStorage.removeItem('currentDownloadId');
+let currentJobId = null, currentJobSource = '', backgroundJob = null;
 let currentJobStatus = '', sourceRevision = 0, rulesRequest = 0, previewRevision = 0;
-let restoreJobOnLoad = true, detachedJob = false;
 let inputUrl = $('url').value.trim();
 let outputLocked = false, directorySeparator = '/';
 function updateOutputHint(output = '') {
@@ -126,6 +127,7 @@ $('chooseDirectory').onclick = () => task(async () => {
   else notice('已取消选择，保存目录保持原样。');
 });
 for (const id of ['bookTitle', 'downloadDirectory']) $(id).addEventListener('input', () => updateOutputHint());
+function sameDownloadSource(a,b) {try{const left=new URL(a),right=new URL(b);left.hash='';right.hash='';return left.href===right.href;}catch{return false;}}
 function isCurrent(revision, url) { return revision === sourceRevision && url === $('url').value.trim(); }
 function clearPreview() { previewRevision++; $('previewResult').innerHTML = ''; }
 function resetResults() {
@@ -139,15 +141,26 @@ function resetResults() {
   $('selectAll').checked = false; $('selectAll').indeterminate = false;
   $('chaptersPanel').classList.add('hidden');
   clearPreview();
-  restoreJobOnLoad = false;
-  // An ongoing download remains controllable; completed results belong to the old source.
-  detachedJob = ['queued', 'running', 'paused'].includes(currentJobStatus);
-  if (!detachedJob) {
-    currentJobId = null; currentJobStatus = '';
-    sessionStorage.removeItem('currentDownloadId');
-    $('jobs').innerHTML = ''; $('downloadPanel').classList.add('hidden');
-  }
+  clearCurrentDownload();
 }
+function setBackgroundDownload(job) {
+  backgroundJob = job || null;
+  $('backgroundDownload').classList.toggle('hidden', !backgroundJob);
+}
+function clearCurrentDownload() {
+  setBackgroundDownload(currentJobId && ['queued','running','paused'].includes(currentJobStatus) ? {id:currentJobId} : null);
+  currentJobId = null; currentJobSource = ''; currentJobStatus = '';
+  sessionStorage.removeItem('currentDownloadId');
+  $('jobs').innerHTML = ''; $('downloadPanel').classList.add('hidden');
+}
+$('stopBackgroundDownload').onclick = async () => {
+  if (!backgroundJob) return;
+  const id=backgroundJob.id, revision=sourceRevision;
+  $('stopBackgroundDownload').disabled=true;
+  try {await api(`/api/jobs/${encodeURIComponent(id)}/stop`,{});if(revision===sourceRevision)notice('已请求停止后台下载，稍后即可重新解析。');await refresh();}
+  catch(e){if(revision===sourceRevision)notice(e.message,true);}
+  finally{$('stopBackgroundDownload').disabled=false;}
+};
 function sourceChanged() {
   const url = $('url').value.trim();
   if (url === inputUrl) return;
@@ -226,13 +239,14 @@ $('download').onclick = () => task(async () => {
   const revision = sourceRevision, source = parsedUrl;
   const input = { url:parsedUrl, title:$('bookTitle').value, directory:$('downloadDirectory').value.trim(), chapterConcurrency:Number($('chapterConcurrency').value || 2), generatePdf:$('generatePdf').checked, splitLongImages:$('splitLongImages').checked, chapters:selected.map(({title,url})=>({title,url})), options:options() };
   let started = false;
+  clearCurrentDownload();
   setOutputLocked(true);
   try {
     const job = await api('/api/jobs', input);
     started = true;
     if (!isCurrent(revision, source)) return;
-    currentJobStatus = job.status; restoreJobOnLoad = false; detachedJob = false;
-    currentJobId = job.id; sessionStorage.setItem('currentDownloadId', job.id);
+    currentJobStatus = job.status; currentJobSource = source;
+    currentJobId = job.id; setBackgroundDownload(null);
     $('bookTitle').value = job.folderName || job.title;
     $('downloadDirectory').value = job.directory || input.directory;
     setOutputLocked(true, job.output);
@@ -248,22 +262,16 @@ function chapterStatus(j, c) {
 $('generatePdf').addEventListener('change', () => { $('splitLongImages').disabled = outputLocked || !$('generatePdf').checked; });
 let refreshing = false;
 async function refresh() {
+  sourceChanged();
   if (refreshing || !backendConnected) return; refreshing = true;
   const revision = sourceRevision, requestedJobId = currentJobId;
   try {
     const allJobs = await api('/api/jobs');
+    sourceChanged();
     if (revision !== sourceRevision || requestedJobId !== currentJobId) return;
-    let current = allJobs.find(j => j.id === currentJobId);
-    if (!current && restoreJobOnLoad) {
-      current = allJobs.find(j => ['queued', 'running', 'paused', 'interrupted'].includes(j.status));
-      currentJobId = current?.id || null;
-      if (currentJobId) sessionStorage.setItem('currentDownloadId', currentJobId);
-      else sessionStorage.removeItem('currentDownloadId');
-    }
-    if (current && detachedJob && !['queued', 'running', 'paused'].includes(current.status)) {
-      current = undefined; currentJobId = null; sessionStorage.removeItem('currentDownloadId');
-    }
-    restoreJobOnLoad = false; currentJobStatus = current?.status || '';
+    const current = allJobs.find(j => j.id === currentJobId && currentJobSource === $('url').value.trim() && (!j.url || sameDownloadSource(j.url,currentJobSource)));
+    setBackgroundDownload(allJobs.find(j => j.id !== current?.id && ['queued','running','paused'].includes(j.status)));
+    currentJobStatus = current?.status || '';
     $('downloadPanel').classList.toggle('hidden', !current);
     if (!current) { $('jobs').innerHTML = ''; return; }
     const jobs = [current];

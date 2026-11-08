@@ -42,11 +42,13 @@ async function app({ route = () => undefined, jobs = [], storedId } = {}) {
   await tick();
   return {$,storage,downloads,runTimers:async()=>{for(const t of timers.splice(0))if(!t.cancelled)t.fn();await tick();},poll:async()=>{clock+=4000;interval();await tick();},url(value){$('url').value=value;$('url').emit('input');}};
 }
+async function startDownload(a,url='https://first.example/book') {a.url(url);await a.$('parse').click();await a.$('download').click();}
 async function parseFirst(a) { a.url('https://first.example/book'); await a.$('parse').click(); await a.$('preview').click(); assert.match(a.$('previewResult').innerHTML,/first\.example/); }
 
 test('switching source clears title, chapters, preview and completed download; polling does not restore them',async()=>{
   const job={id:'old',status:'completed',title:'OLD JOB',done:1,total:1,failed:0,message:'done',output:'/test',chapters:[{status:'completed',number:1,title:'old',imageCount:1}]};
-  const a=await app({jobs:[job],storedId:'old'});
+  const a=await app({jobs:[job],storedId:'old',route:(p,b)=>p==='/api/jobs'&&b?job:undefined});
+  assert.equal(a.$('jobs').innerHTML,'');await startDownload(a);
   assert.match(a.$('jobs').innerHTML,/OLD JOB/);
   a.url('https://second.example/book');
   assert.equal(a.$('jobs').innerHTML,'');assert.equal(a.storage.has('currentDownloadId'),false);
@@ -88,22 +90,26 @@ test('late preview and stale rules from another source are ignored',async()=>{
   pendingRules.resolve({imageSelector:'.OLD-SELECTOR'});await tick();
   assert.equal(a.$('imageSelector').value,'');assert.match(a.$('bookTitle').value,/second\.example/);
 });
-test('changing chapter selection clears preview and active downloads remain controllable',async()=>{
+test('changing source removes active downloads from the list while offering a separate background stop control',async()=>{
   const a=await app();await parseFirst(a);
   a.$('chapterList').onchange({target:{dataset:{index:'0'},checked:false}});
   assert.equal(a.$('previewResult').innerHTML,'');
   const job={id:'active',status:'running',title:'RUNNING',done:0,total:1,failed:0,message:'running',output:'/test',chapters:[]};
-  const b=await app({jobs:[job],storedId:'active'});b.url('https://second.example/book');await b.poll();
-  assert.match(b.$('jobs').innerHTML,/data-action="stop"/);
+  let stopped=false;const b=await app({jobs:[job],storedId:'active',route:(p,body)=>{if(p==='/api/jobs'&&body)return job;if(p==='/api/jobs/active/stop'){stopped=true;job.status='stopped';return job;}}});
+  await startDownload(b);assert.match(b.$('jobs').innerHTML,/data-action="stop"/);
+  b.url('https://second.example/book');assert.equal(b.$('jobs').innerHTML,'');await b.poll();
+  assert.equal(b.$('downloadPanel').classList.contains('hidden'),true);assert.equal(b.$('backgroundDownload').classList.contains('hidden'),false);assert.equal(stopped,false);
+  await b.$('stopBackgroundDownload').click();assert.equal(stopped,true);assert.equal(b.$('backgroundDownload').classList.contains('hidden'),true);
 });
-test('in-flight polling cannot revive old jobs, and a detached active job disappears once finished',async()=>{
+test('in-flight polling cannot revive old jobs and background completion does not repopulate the list',async()=>{
   const job={id:'old',status:'completed',title:'OLD JOB',done:1,total:1,failed:0,message:'done',output:'/test',chapters:[]};
   let delayed=false;const pending=deferred();
-  const a=await app({jobs:[job],storedId:'old',route:p=>p==='/api/jobs'&&delayed?pending.promise:undefined});
-  delayed=true;const polling=a.poll();await tick();a.url('https://second.example/book');pending.resolve([job]);await polling;
+  const a=await app({jobs:[job],storedId:'old',route:(p,b)=>p==='/api/jobs'?(b?job:delayed?pending.promise:undefined):undefined});
+  await startDownload(a);delayed=true;const polling=a.poll();await tick();a.url('https://second.example/book');pending.resolve([job]);await polling;
   assert.equal(a.$('jobs').innerHTML,'');assert.equal(a.$('downloadPanel').classList.contains('hidden'),true);
-  job.status='running';const b=await app({jobs:[job],storedId:'old'});b.url('https://second.example/book');await b.poll();
-  assert.match(b.$('jobs').innerHTML,/OLD JOB/);job.status='completed';await b.poll();
+  job.status='running';const b=await app({jobs:[job],storedId:'old',route:(p,body)=>p==='/api/jobs'&&body?job:undefined});await startDownload(b);b.url('https://second.example/book');await b.poll();
+  assert.equal(b.$('jobs').innerHTML,'');assert.equal(b.$('backgroundDownload').classList.contains('hidden'),false);job.status='completed';await b.poll();
+  assert.equal(b.$('backgroundDownload').classList.contains('hidden'),true);
   assert.equal(b.$('jobs').innerHTML,'');assert.equal(b.$('downloadPanel').classList.contains('hidden'),true);
 });
 test('prefills default destination, allows choosing a folder and locks the final name when download starts',async()=>{
@@ -152,7 +158,7 @@ test('PDF failure and completed chapter links render separately from image downl
     {number:1,title:'chapter1',status:'completed',imageCount:2,pdf:{status:'failed',error:'bad <tag>'}},
     {number:2,title:'chapter2',status:'completed',imageCount:2,pdf:{status:'completed',file:'chapter2.pdf',pages:2}},
   ]};
-  const a=await app({jobs:[job],storedId:'pdfjob'});const html=a.$('jobs').innerHTML;
+  const a=await app({jobs:[job],storedId:'pdfjob',route:(p,b)=>p==='/api/jobs'&&b?job:undefined});await startDownload(a);const html=a.$('jobs').innerHTML;
   assert.match(html,/data-action="retry-pdf"/);assert.match(html,/bad &lt;tag&gt;/);assert.match(html,/\/api\/jobs\/pdfjob\/chapters\/2\/pdf/);assert.match(html,/2 页/);
 });
 test('local PDF tool works without parsing a URL, preserves chosen order and clears old results when source changes',async()=>{
@@ -190,4 +196,37 @@ test('disconnect uses the connected instance and does not restart or redownload 
 test('manually opened install instructions remain visible while an existing service is connected',async()=>{
   const a=await app();await a.$('connectBackend').click();a.$('showHelperGuide').click();await a.poll();
   assert.equal(a.$('helperGuide').classList.contains('hidden'),false);assert.equal(a.$('backendState').textContent,'已连接');
+});
+function downloadJob(id,status='completed',url='https://first.example/book'){return {id,status,url,title:`JOB-${id}`,done:1,total:1,failed:0,message:status,output:'/test',chapters:[]};}
+test('opening or reconnecting the page never restores previous lists from session IDs or backend history',async()=>{
+  for(const status of ['queued','running','paused','completed','partial','failed','stopped','interrupted']){
+    const old=downloadJob('legacy',status);const a=await app({jobs:[old],storedId:old.id});
+    await a.poll();await a.$('connectBackend').click();
+    assert.equal(a.$('jobs').innerHTML,'',status);assert.equal(a.$('downloadPanel').classList.contains('hidden'),true,status);assert.equal(a.storage.has('currentDownloadId'),false);
+    assert.equal(a.$('backgroundDownload').classList.contains('hidden'),!['queued','running','paused'].includes(status));
+  }
+});
+test('a new website download shows only its own job while old completed records remain on the backend',async()=>{
+  const old=downloadJob('old'),fresh=downloadJob('fresh','running','https://second.example/book');const records=[old,fresh];
+  const a=await app({jobs:records,route:(p,b)=>p==='/api/jobs'&&b?(b.url===old.url?old:fresh):undefined});
+  await startDownload(a,old.url);assert.match(a.$('jobs').innerHTML,/JOB-old/);
+  a.url(fresh.url);assert.equal(a.$('jobs').innerHTML,'');await startDownload(a,fresh.url);await a.poll();
+  assert.match(a.$('jobs').innerHTML,/JOB-fresh/);assert.doesNotMatch(a.$('jobs').innerHTML,/JOB-old/);
+});
+test('a late download-creation response for the previous source cannot bind its list to the new source',async()=>{
+  const pending=deferred(),old=downloadJob('late','running');let created=false;
+  const a=await app({route:(p,b)=>{if(p==='/api/jobs'&&b)return pending.promise;if(p==='/api/jobs')return created?[old]:[];}});
+  a.url(old.url);await a.$('parse').click();const starting=a.$('download').click();await tick();
+  a.url('https://second.example/book');created=true;pending.resolve(old);await starting;await a.poll();
+  assert.equal(a.$('jobs').innerHTML,'');assert.equal(a.$('downloadPanel').classList.contains('hidden'),true);assert.equal(a.$('backgroundDownload').classList.contains('hidden'),false);assert.equal(a.$('bookTitle').readOnly,false);
+});
+test('browser autofill without input events still clears the previous source on the next refresh',async()=>{
+  const old=downloadJob('autofill');const a=await app({jobs:[old],route:(p,b)=>p==='/api/jobs'&&b?old:undefined});
+  await startDownload(a,old.url);assert.match(a.$('jobs').innerHTML,/JOB-autofill/);
+  a.$('url').value='https://new.example/book';await a.poll();
+  assert.equal(a.$('jobs').innerHTML,'');assert.equal(a.$('chapterList').innerHTML,'');assert.equal(a.$('bookTitle').value,'');
+});
+test('normalization by the backend does not hide the current task for a URL without a trailing slash',async()=>{
+  const job=downloadJob('normalized','running','https://first.example/');const a=await app({jobs:[job],route:(p,b)=>p==='/api/jobs'&&b?job:undefined});
+  await startDownload(a,'https://first.example');assert.match(a.$('jobs').innerHTML,/JOB-normalized/);
 });
